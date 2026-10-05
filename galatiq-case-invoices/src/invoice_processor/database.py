@@ -42,7 +42,7 @@ class InventoryDatabaseError(RuntimeError):
     """Raised when the inventory database cannot be created or accessed."""
 
 
-def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+def get_connection(db_path: Path | str = DEFAULT_DB_PATH, *, read_only: bool = False) -> sqlite3.Connection:
     """Open a connection to an existing inventory database.
 
     Raises:
@@ -55,7 +55,10 @@ def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
             "Run `python scripts/init_db.py` to create it."
         )
     try:
-        conn = sqlite3.connect(path)
+        if read_only:
+            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(path)
     except sqlite3.Error as exc:
         raise InventoryDatabaseError(f"Could not open database at {path}: {exc}") from exc
     conn.row_factory = sqlite3.Row

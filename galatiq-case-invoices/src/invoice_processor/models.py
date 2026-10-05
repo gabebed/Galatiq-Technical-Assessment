@@ -143,6 +143,7 @@ class IssueCode(str, Enum):
     DUPLICATE_INVOICE = "duplicate_invoice"
     UNSUPPORTED_CURRENCY = "unsupported_currency"
     SUSPICIOUS_CONTENT = "suspicious_content"
+    EXTRACTION_UNCERTAIN = "extraction_uncertain"  # a value was unreadable or auto-corrected
 
 
 class ValidationIssue(_Model):
