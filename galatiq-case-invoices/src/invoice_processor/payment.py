@@ -1,9 +1,11 @@
 """Payment stage: a local mock payment tool and the gate that guards it.
 
-``process_payment`` is the only sanctioned way to pay an invoice. It calls the
-payment function only when the invoice was explicitly APPROVED *and* passed
-validation, re-checking both instead of trusting upstream stages. Anything else
-yields a SKIPPED result explaining why. Everything is local; no banking API.
+Every payment path goes through ``authorize_payment``, which issues a
+``PaymentAuthorization`` only when the invoice passed validation and has an
+explicit APPROVED decision made on its exact vendor, amount, and currency.
+Upstream stages are re-checked, not trusted. ``execute_authorized_payment`` is
+the only caller of the payment function (enforced by tests/test_qa_invariants.py).
+Everything is local; there is no banking API.
 """
 
 from __future__ import annotations

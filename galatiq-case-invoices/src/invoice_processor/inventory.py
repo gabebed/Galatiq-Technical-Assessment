@@ -1,4 +1,4 @@
-"""Inventory lookup interface used by the validation stage (and, later, agent tools)."""
+"""Read-only inventory lookup used by deterministic validation and the validation agent's tools."""
 
 from __future__ import annotations
 

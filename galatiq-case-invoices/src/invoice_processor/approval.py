@@ -4,11 +4,11 @@ Structure:
 
 * ``ApprovalPolicy`` - business rules as data (threshold, FX rates, blocking warnings).
 * ``Approver`` - the decision-maker interface. ``RuleBasedApprover`` is the
-  deterministic implementation; an LLM-based VP agent can implement the same
-  interface later, or wrap this one and refine its reasoning.
+  deterministic implementation; ``approval_agent.LLMApprover`` is the Grok
+  agent with a critique loop, constrained by this one.
 * ``approve_invoice`` - entry point. Runs any ``Approver`` and then enforces the
   non-negotiable rules, so no approver (deterministic or LLM) can approve an
-  invoice with hard failures or skip required scrutiny.
+  invoice with hard failures, approve different terms, or skip required scrutiny.
 """
 
 from __future__ import annotations

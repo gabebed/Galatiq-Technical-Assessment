@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import sys
+import time
+from collections import Counter
 from collections.abc import Sequence
 from enum import IntEnum
 from pathlib import Path
@@ -15,7 +17,8 @@ from invoice_processor.database import DEFAULT_DB_PATH
 from invoice_processor.ingestion import SUPPORTED_EXTENSIONS
 from invoice_processor.inventory import SQLiteInventory
 from invoice_processor.llm import LLMClient, LLMError, create_llm_client
-from invoice_processor.report import format_result, format_summary, to_json
+from invoice_processor.observability import configure_logging, invoice_context
+from invoice_processor.report import format_result, format_summary, status_label, to_json
 from invoice_processor.workflow import InvoiceState, PipelineStatus, build_workflow, run_invoice
 
 logger = logging.getLogger("invoice_processor.cli")
@@ -56,6 +59,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="use LLM agents: 'auto' uses them when XAI_API_KEY is set (default: auto)")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON instead of a report")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="log to stderr (-v info, -vv debug)")
+    parser.add_argument("--log-format", choices=("text", "json"), default="text",
+                        help="stderr log format; 'json' emits one JSON object per line (default: text)")
     return parser
 
 
@@ -94,10 +99,10 @@ def _exit_code(states: Sequence[InvoiceState]) -> ExitCode:
     return ExitCode.ALL_PAID
 
 
-def _configure_output(verbosity: int) -> None:
+def _configure_output(verbosity: int, log_format: str) -> None:
     # Errors are already rendered in the report; logs are opt-in to avoid duplicate output.
     level = logging.CRITICAL if verbosity == 0 else logging.INFO if verbosity == 1 else logging.DEBUG
-    logging.basicConfig(level=level, stream=sys.stderr, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    configure_logging(level, log_format)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")  # never crash on characters the console cannot show
@@ -114,14 +119,18 @@ def run(args: argparse.Namespace) -> ExitCode:
     mode = f"LLM agents ({llm!r})" if llm else "deterministic (no LLM)"
 
     results: list[tuple[Path, InvoiceState]] = []
+    logger.info("Run started: %d invoice(s), mode=%s, inventory=%s", len(files), mode, args.db_path)
     if not args.json:
         print(f"Processing {len(files)} invoice(s) | mode: {mode} | inventory: {args.db_path}\n")
     for path in files:
-        try:
-            state = run_invoice(path, workflow)
-        except Exception as exc:  # isolate failures: one bad invoice must not stop the batch
-            logger.exception("Unexpected error processing %s", path)
-            state = {"status": PipelineStatus.FAILED, "error": f"Unexpected error: {type(exc).__name__}: {exc}"}
+        started = time.perf_counter()
+        with invoice_context(path.name):
+            try:
+                state = run_invoice(path, workflow)
+            except Exception as exc:  # isolate failures: one bad invoice must not stop the batch
+                logger.exception("Unexpected error processing %s", path)
+                state = {"status": PipelineStatus.FAILED, "error": f"Unexpected error: {type(exc).__name__}: {exc}"}
+            logger.info("Finished: %s in %.0f ms", status_label(state), (time.perf_counter() - started) * 1000)
         results.append((path, state))
         if not args.json:
             print(format_result(path, state), end="\n\n", flush=True)
@@ -130,12 +139,15 @@ def run(args: argparse.Namespace) -> ExitCode:
         print(json.dumps({"mode": mode, "invoices": [to_json(p, s) for p, s in results]}, indent=2))
     elif len(results) > 1:
         print(format_summary(results))
-    return _exit_code([s for _, s in results])
+    exit_code = _exit_code([s for _, s in results])
+    counts = Counter(status_label(s) for _, s in results)
+    logger.info("Run finished: %s; exit code %d", dict(counts), exit_code)
+    return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    _configure_output(args.verbose)
+    _configure_output(args.verbose, args.log_format)
     try:
         return run(args)
     except InputError as exc:
