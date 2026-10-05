@@ -77,12 +77,21 @@ class InvoiceState(TypedDict, total=False):
     agent_errors: Annotated[list[str], operator.add]
 
 
+class WorkflowInput(TypedDict):
+    """The only accepted input. Any other keys a caller passes (e.g. a forged ``approval``)
+    are dropped, so every stage result in state is produced by the graph itself."""
+
+    invoice_path: str
+
+
 def _route_after_ingest(state: InvoiceState) -> Literal["validate", "__end__"]:
-    return "validate" if "invoice" in state else END
+    if state.get("status") is PipelineStatus.FAILED or "invoice" not in state:
+        return END
+    return "validate"
 
 
 def _route_after_validate(state: InvoiceState) -> Literal["approve", "reject", "__end__"]:
-    if "validation" not in state:
+    if state.get("status") is PipelineStatus.FAILED or "validation" not in state:
         return END
     return "approve" if state["validation"].is_valid else "reject"
 
@@ -187,7 +196,7 @@ def build_workflow(
     def pay_invoice(state: InvoiceState) -> InvoiceState:
         return payment_step(state["invoice"], state["validation"], state.get("approval"), pay=pay, llm=llm)
 
-    graph = StateGraph(InvoiceState)
+    graph = StateGraph(InvoiceState, input_schema=WorkflowInput)
     graph.add_node("ingest", ingest)
     graph.add_node("validate", validate)
     graph.add_node("approve", approve)

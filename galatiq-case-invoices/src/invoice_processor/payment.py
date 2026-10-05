@@ -17,6 +17,8 @@ from decimal import Decimal
 from typing import Protocol
 
 from invoice_processor.approval import hard_failures
+from pydantic import BaseModel, ValidationError
+
 from invoice_processor.models import ApprovalResult, Invoice, PaymentResult, PaymentStatus, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -85,10 +87,34 @@ class DuplicatePaymentGuard:
         return result
 
 
+def _strictly_valid(model: BaseModel, exclude: set[str] | None = None) -> bool:
+    """True if the object would pass validation as-is (strict: no type coercion, e.g. 'approved' -> enum)."""
+    try:
+        type(model).model_validate(model.model_dump(exclude=exclude, warnings=False), strict=True)
+    except (ValidationError, TypeError, AttributeError):
+        return False
+    return True
+
+
 def payment_blockers(
     invoice: Invoice, validation: ValidationResult, approval: ApprovalResult | None
 ) -> list[str]:
     """Every reason this invoice must not be paid. Empty means payment may proceed."""
+    # Only genuine model instances count; a look-alike object claiming is_approved=True does not.
+    malformed = [
+        f"Malformed {label}: expected {cls.__name__}, got {type(value).__name__}."
+        for label, value, cls in (("invoice", invoice, Invoice), ("validation result", validation, ValidationResult))
+        if not isinstance(value, cls)
+    ]
+    if approval is not None and not isinstance(approval, ApprovalResult):
+        malformed.append(f"Malformed approval: expected ApprovalResult, got {type(approval).__name__}.")
+    elif approval is not None and not _strictly_valid(approval):
+        malformed.append("Malformed approval: it was not built through validation (e.g. model_construct).")
+    if isinstance(validation, ValidationResult) and not _strictly_valid(validation, exclude={"is_valid"}):
+        malformed.append("Malformed validation result: it was not built through validation.")
+    if malformed:
+        return malformed
+
     blockers = []
     if approval is None:
         blockers.append("No approval result: payment requires an explicit approval.")
@@ -142,7 +168,9 @@ def authorize_payment(
     blockers = payment_blockers(invoice, validation, approval)
     if blockers:
         raise PaymentNotAuthorizedError(blockers)
-    assert invoice.invoice_number and invoice.vendor_name and invoice.total  # guaranteed by payment_blockers
+    # Already guaranteed by payment_blockers; an explicit check (not ``assert``) survives ``python -O``.
+    if not (invoice.invoice_number and invoice.vendor_name and invoice.total and invoice.total > 0):
+        raise PaymentNotAuthorizedError(["Invoice is missing a number, vendor, or positive total."])
     return PaymentAuthorization(
         invoice_number=invoice.invoice_number, vendor=invoice.vendor_name, amount=invoice.total,
         currency=invoice.currency,

@@ -38,6 +38,7 @@ FLAG_OVER_THRESHOLD = "over_threshold"
 FLAG_CURRENCY_NOT_CONVERTED = "currency_not_converted"
 FLAG_BLOCKING_WARNINGS = "blocking_warnings"
 FLAG_OVERRIDDEN = "approval_overridden"
+FLAG_MALFORMED_APPROVAL = "malformed_approval"
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,25 @@ def enforce_hard_rules(
     return result.model_copy(update=updates)
 
 
+def _well_formed(raw: object, invoice: Invoice) -> ApprovalResult:
+    """Re-validate approver output; anything that is not a valid ApprovalResult counts as REJECTED."""
+    try:
+        if not isinstance(raw, ApprovalResult):
+            raise TypeError(f"expected ApprovalResult, got {type(raw).__name__}")
+        # Strict: an object built with model_construct() (e.g. decision="approved" as a plain string)
+        # is rejected rather than coerced into a real approval.
+        return ApprovalResult.model_validate(raw.model_dump(warnings=False), strict=True)
+    except (TypeError, ValueError, AttributeError) as exc:  # pydantic.ValidationError is a ValueError
+        logger.error("%s: malformed approver output rejected: %s", invoice.invoice_number, exc)
+        return ApprovalResult(
+            invoice_number=invoice.invoice_number,
+            decision=ApprovalDecision.REJECTED,
+            reasoning=f"Approver output was malformed and cannot be treated as an approval: {exc}",
+            flags=[FLAG_MALFORMED_APPROVAL],
+            reviewer="approval-gate",
+        )
+
+
 def approve_invoice(
     invoice: Invoice,
     validation: ValidationResult,
@@ -229,7 +249,7 @@ def approve_invoice(
     _check_same_invoice(invoice, validation)
     policy = policy or ApprovalPolicy()
     approver = approver or RuleBasedApprover(policy)
-    result = enforce_hard_rules(invoice, validation, approver.review(invoice, validation), policy)
+    result = enforce_hard_rules(invoice, validation, _well_formed(approver.review(invoice, validation), invoice), policy)
     logger.info(
         "Approval for %s: %s (scrutiny=%s, flags=%s)",
         invoice.invoice_number, result.decision.value, result.requires_additional_scrutiny, result.flags,
