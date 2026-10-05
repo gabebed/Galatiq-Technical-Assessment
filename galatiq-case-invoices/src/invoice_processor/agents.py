@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from invoice_processor.agent_tools import build_payment_tools, build_validation_tools
 from invoice_processor.inventory import InventoryLookup
-from invoice_processor.llm import LLMClient, LLMError
+from invoice_processor.llm import LLMClient
 from invoice_processor.models import Invoice, PaymentResult, PaymentStatus, ValidationResult
 from invoice_processor.payment import PaymentAuthorization, PaymentFunction, mock_payment
 from invoice_processor.tools import ToolCallRecord
@@ -76,10 +76,11 @@ def run_payment_agent(
     failure = None
     try:
         report = llm.run_tools(PAYMENT_SYSTEM, prompt, toolset, PaymentReport, max_rounds=3)
-    except LLMError as exc:
-        failure = f"Payment agent error: {exc}"
-        logger.error("Payment agent failed for %s: %s", authorization.invoice_number, exc)
+    except Exception as exc:  # any failure, possibly *after* money moved: the tool's record is the truth
+        failure = f"Payment agent error: {type(exc).__name__}: {exc}"
+        logger.error("Payment agent failed for %s: %s", authorization.invoice_number, failure)
 
+    # Recorded from what the tool executed, never from the agent's report.
     payment = toolset.completed_payment or (toolset.payments[-1] if toolset.payments else None)
     if payment is None:
         reason = failure or (report.summary if report else "no reason given")

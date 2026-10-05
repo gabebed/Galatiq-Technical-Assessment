@@ -33,7 +33,7 @@ from invoice_processor.approval_agent import LLMApprover
 from invoice_processor.database import InventoryDatabaseError
 from invoice_processor.ingestion import IngestionError, extract_invoice
 from invoice_processor.inventory import InventoryLookup
-from invoice_processor.llm import LLMClient, LLMError
+from invoice_processor.llm import LLMClient
 from invoice_processor.models import (
     ApprovalResult,
     Invoice,
@@ -42,6 +42,7 @@ from invoice_processor.models import (
     ValidationResult,
 )
 from invoice_processor.payment import (
+    DuplicatePaymentGuard,
     PaymentFunction,
     PaymentNotAuthorizedError,
     authorize_payment,
@@ -129,15 +130,19 @@ def payment_step(
 def build_workflow(
     inventory: InventoryLookup,
     *,
-    pay: PaymentFunction = mock_payment,
+    pay: PaymentFunction | None = None,
     approver: Approver | None = None,
     policy: ApprovalPolicy | None = None,
     llm: LLMClient | None = None,
 ) -> CompiledStateGraph:
     """Compile the invoice-processing graph with the given tools (and optional LLM agents).
 
-    With ``llm`` and no explicit ``approver``, approval uses ``LLMApprover`` (draft -> critique -> revise).
+    ``pay`` defaults to ``mock_payment`` behind a ``DuplicatePaymentGuard``, so one compiled
+    workflow never pays the same invoice number twice. With ``llm`` and no explicit
+    ``approver``, approval uses ``LLMApprover`` (draft -> critique -> revise).
     """
+    if pay is None:
+        pay = DuplicatePaymentGuard(mock_payment)
     if approver is None and llm is not None:
         approver = LLMApprover(llm, policy)
 
@@ -162,7 +167,7 @@ def build_workflow(
                 review, calls = review_validation(llm, invoice, validation, inventory)
                 update["validation_review"] = review
                 update["tool_calls"] = calls
-            except LLMError as exc:  # advisory: deterministic result stands
+            except Exception as exc:  # advisory: any agent failure leaves the deterministic result standing
                 logger.warning("Validation agent unavailable for %s: %s", invoice.invoice_number, exc)
                 update["agent_errors"] = [f"validation agent: {exc}"]
         return update

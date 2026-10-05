@@ -130,10 +130,10 @@ class Toolset:
             return ToolResult(tool=name, ok=False, error=f"Invalid arguments for {name}: {problems}")
 
         try:
-            output = tool.handler(args)
+            data = tool.handler(args).model_dump(mode="json")
         except ToolRefused as exc:
             return ToolResult(tool=name, ok=False, error=str(exc))
-        except Exception as exc:  # a tool failure must not crash the agent loop
+        except Exception as exc:  # a tool failure (or a non-model return value) must not crash the agent loop
             logger.exception("tool %s.%s raised", self.name, name)
             return ToolResult(tool=name, ok=False, error=f"{name} failed: {type(exc).__name__}: {exc}")
-        return ToolResult(tool=name, ok=True, data=output.model_dump(mode="json"))
+        return ToolResult(tool=name, ok=True, data=data)

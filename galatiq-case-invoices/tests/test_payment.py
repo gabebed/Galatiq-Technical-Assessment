@@ -58,7 +58,9 @@ def _invalid(number: str = "INV-1001") -> ValidationResult:
 
 
 def _approval(decision: ApprovalDecision, number: str = "INV-1001", reasoning: str = "Within policy.") -> ApprovalResult:
-    return ApprovalResult(invoice_number=number, decision=decision, reasoning=reasoning)
+    """An approval bound to the terms of ``_invoice()``."""
+    return ApprovalResult(invoice_number=number, decision=decision, reasoning=reasoning,
+                          reviewed_vendor="Widgets Inc.", reviewed_amount=Decimal("5000.00"), reviewed_currency="USD")
 
 
 # --------------------------------------------------------------------------- #

@@ -64,7 +64,8 @@ def parse_money(value: Any, field: str, warnings: list[str]) -> Decimal | None:
     text = clean_text(value)
     if text is None:
         return None
-    cleaned = re.sub(r"[\s$€£,]|USD|EUR", "", _fix_ocr_digits(text, field, warnings), flags=re.IGNORECASE)
+    # Currency markers are stripped here; builder._currency_markers reads them first.
+    cleaned = re.sub(r"[\s$€£,]|USD|EUR|GBP", "", _fix_ocr_digits(text, field, warnings), flags=re.IGNORECASE)
     if not _NUMBER.fullmatch(cleaned):
         warnings.append(f"{field}: could not parse {text!r} as an amount")
         return None

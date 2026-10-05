@@ -15,7 +15,6 @@ from invoice_processor.database import DEFAULT_DB_PATH
 from invoice_processor.ingestion import SUPPORTED_EXTENSIONS
 from invoice_processor.inventory import SQLiteInventory
 from invoice_processor.llm import LLMClient, LLMError, create_llm_client
-from invoice_processor.payment import DuplicatePaymentGuard, mock_payment
 from invoice_processor.report import format_result, format_summary, to_json
 from invoice_processor.workflow import InvoiceState, PipelineStatus, build_workflow, run_invoice
 
@@ -110,8 +109,8 @@ def run(args: argparse.Namespace) -> ExitCode:
         raise InputError(f"Inventory database not found at {args.db_path}. Run: python scripts/init_db.py")
 
     llm = _select_llm(args.llm)
-    pay = DuplicatePaymentGuard(mock_payment)  # never pay the same invoice number twice in one run
-    workflow = build_workflow(SQLiteInventory(args.db_path), pay=pay, llm=llm)
+    # The workflow's default payment function refuses to pay an invoice number twice in one run.
+    workflow = build_workflow(SQLiteInventory(args.db_path), llm=llm)
     mode = f"LLM agents ({llm!r})" if llm else "deterministic (no LLM)"
 
     results: list[tuple[Path, InvoiceState]] = []

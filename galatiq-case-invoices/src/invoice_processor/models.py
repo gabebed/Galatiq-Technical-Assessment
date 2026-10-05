@@ -196,11 +196,25 @@ class ApprovalResult(_Model):
     review_trail: list[NonEmptyText] = Field(
         default_factory=list, description="Drafts and critiques from a reflective approval loop, in order."
     )
+    # The exact terms this decision was made on. Payment is authorized only for these,
+    # so an approval of one version of an invoice cannot pay a different version.
+    reviewed_vendor: OptionalText = None
+    reviewed_amount: Decimal | None = None
+    reviewed_currency: OptionalText = None
     decided_at: datetime = Field(default_factory=_utc_now)
 
     @property
     def is_approved(self) -> bool:
         return self.decision is ApprovalDecision.APPROVED
+
+    def covers_terms(self, invoice: Invoice) -> bool:
+        """True if this decision was made on the invoice's exact vendor, amount, and currency."""
+        return (
+            self.reviewed_amount is not None
+            and self.reviewed_amount == invoice.total
+            and self.reviewed_vendor == invoice.vendor_name
+            and self.reviewed_currency == invoice.currency
+        )
 
 
 # --------------------------------------------------------------------------- #

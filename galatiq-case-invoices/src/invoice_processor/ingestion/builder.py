@@ -6,6 +6,7 @@ here so every format is normalized identically.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,9 +66,10 @@ def build_invoice(raw: RawInvoice, *, source_file: str | None = None) -> Invoice
     items = [item for i, r in enumerate(raw.items) if (item := _build_item(r, i, warnings))]
 
     try:
-        currency = parse_currency(raw.currency)
+        declared = parse_currency(raw.currency)
     except ValueError as exc:
         raise IngestionError(str(exc)) from exc
+    currency = _resolve_currency(declared, _currency_markers(raw))
 
     fields: dict[str, Any] = {
         "invoice_number": normalize_invoice_number(raw.invoice_number),
@@ -97,6 +99,32 @@ def build_invoice(raw: RawInvoice, *, source_file: str | None = None) -> Invoice
         return Invoice(**fields)
     except ValidationError as exc:  # normalizers should prevent this; fail loudly if not
         raise IngestionError(f"Extracted data does not fit the Invoice model: {exc}") from exc
+
+
+_CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP"}
+_CURRENCY_CODES = re.compile(r"\b(USD|EUR|GBP)\b", re.IGNORECASE)
+
+
+def _currency_markers(raw: RawInvoice) -> set[str]:
+    """Currencies indicated by symbols/codes on the raw amount strings ('$' is read as USD)."""
+    amounts = [raw.subtotal, raw.tax_amount, raw.shipping, raw.total]
+    amounts += [value for item in raw.items for value in (item.unit_price, item.line_total)]
+    found = set()
+    for value in amounts:
+        if isinstance(value, str):
+            found.update(code for symbol, code in _CURRENCY_SYMBOLS.items() if symbol in value)
+            found.update(match.upper() for match in _CURRENCY_CODES.findall(value))
+    return found
+
+
+def _resolve_currency(declared: str | None, markers: set[str]) -> str | None:
+    """Never silently treat marked amounts as another currency; ambiguity is a hard error."""
+    if len(markers) > 1:
+        raise IngestionError(f"Amounts are in more than one currency ({', '.join(sorted(markers))}); "
+                             "the amount to pay is ambiguous.")
+    if declared and markers and markers != {declared}:
+        raise IngestionError(f"Invoice currency is {declared} but amounts are marked {markers.pop()}.")
+    return declared or (next(iter(markers)) if markers else None)
 
 
 def _build_item(raw: RawItem, index: int, warnings: list[str]) -> InvoiceItem | None:

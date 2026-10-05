@@ -34,8 +34,8 @@ def mock_payment(
     problems = []
     if not vendor:
         problems.append("no vendor given")
-    if not isinstance(amount, Decimal) or amount <= 0:
-        problems.append(f"amount must be a positive Decimal, got {amount!r}")
+    if not isinstance(amount, Decimal) or not amount.is_finite() or amount <= 0:
+        problems.append(f"amount must be a positive, finite Decimal, got {amount!r}")
     if problems:
         logger.warning("Mock payment refused for %s: %s", invoice_number, "; ".join(problems))
         return PaymentResult(
@@ -92,6 +92,12 @@ def payment_blockers(
         blockers.append("No approval result: payment requires an explicit approval.")
     elif not approval.is_approved:
         blockers.append(f"Invoice was {approval.decision.value}, not approved. Approver reasoning: {approval.reasoning}")
+    elif not approval.covers_terms(invoice):
+        blockers.append(
+            f"The approval does not cover this invoice's terms: approved {approval.reviewed_amount} "
+            f"{approval.reviewed_currency} to {approval.reviewed_vendor!r}, but the invoice is "
+            f"{invoice.total} {invoice.currency} to {invoice.vendor_name!r}."
+        )
     if not validation.is_valid:
         blockers.append(f"Validation failed with {len(validation.errors)} error(s).")
     ids = {invoice.invoice_number, validation.invoice_number}

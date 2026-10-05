@@ -25,7 +25,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from invoice_processor.approval import ApprovalPolicy, RuleBasedApprover
+from invoice_processor.approval import ApprovalPolicy, RuleBasedApprover, reviewed_terms
 from invoice_processor.llm import LLMClient, LLMError
 from invoice_processor.models import ApprovalDecision, ApprovalResult, Invoice, ValidationResult
 
@@ -216,7 +216,9 @@ class LLMApprover:
                 draft = self._revise(context, draft, critique)
                 trail.append(_describe_draft(round_number + 1, draft))
                 unresolved = True  # this revision has not been critiqued yet
-        except LLMError as exc:
+        except Exception as exc:  # LLMError or any client defect: the deterministic decision is always safe
+            if not isinstance(exc, LLMError):
+                logger.exception("Approval agent crashed for %s", invoice.invoice_number)
             logger.warning("Approval agent unavailable for %s: %s", invoice.invoice_number, exc)
             return baseline.model_copy(update={
                 "flags": [*baseline.flags, FLAG_LLM_UNAVAILABLE],
@@ -269,6 +271,7 @@ class LLMApprover:
             flags=list(dict.fromkeys(flags)),
             reviewer=self.reviewer,
             review_trail=trail,
+            **reviewed_terms(invoice),
         )
         logger.info("LLM approval for %s: %s after %d step(s)%s", invoice.invoice_number, decision.value,
                     len(trail), " (overridden by policy)" if FLAG_OVERRIDDEN_BY_POLICY in flags else "")

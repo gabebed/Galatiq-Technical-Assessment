@@ -46,10 +46,10 @@ _LABEL_RE = re.compile(
 _TAX_RATE = re.compile(r"\(\s*(\d+(?:\.\d+)?)\s*%\s*\)")
 _INVOICE_ID = re.compile(r"\bINV[\s#-]*(\d{3,})\b", re.IGNORECASE)
 
-_NAME = r"(?P<name>[A-Za-z][^:$]*?)"
+_NAME = r"(?P<name>[A-Za-z][^:$€£]*?)"
 _NUMBER = r"-?[\d,.Oo]*\d[\d,.Oo]*"  # tolerates OCR 'O' for zero; cleaned up by normalize
-_PRICE = rf"\$?\s*{_NUMBER}"
-_DOLLARS = rf"\$\s*{_NUMBER}"  # tables require '$' so stray numbers aren't read as items
+_PRICE = rf"[$€£]?\s*{_NUMBER}"
+_DOLLARS = rf"[$€£]\s*{_NUMBER}"  # tables require a currency symbol so stray numbers aren't read as items
 _ITEM_PATTERNS = (
     re.compile(
         rf"^{_NAME}\s+qty\s*:?\s*(?P<quantity>-?\d+)\s+(?:unit\s+price\s*:?|@)\s*(?P<unit_price>{_PRICE})",

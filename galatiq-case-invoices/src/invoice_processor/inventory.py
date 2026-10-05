@@ -41,7 +41,18 @@ class SQLiteInventory:
             raise InventoryDatabaseError(f"Inventory lookup failed ({self.db_path}): {exc}") from exc
         finally:
             conn.close()
-        return {row["item"]: row["stock"] for row in rows}
+
+        levels = {}
+        for row in rows:
+            stock = row["stock"]
+            # Corrupt stock (NULL, text, negative) must fail closed, never be guessed at.
+            if isinstance(stock, bool) or not isinstance(stock, int) or stock < 0:
+                raise InventoryDatabaseError(
+                    f"Invalid stock value {stock!r} for {row['item']!r} in {self.db_path}; "
+                    "stock must be a non-negative integer."
+                )
+            levels[row["item"]] = stock
+        return levels
 
     def get_stock(self, item: str) -> int | None:
         """Stock for one item, or None if it is not in inventory."""

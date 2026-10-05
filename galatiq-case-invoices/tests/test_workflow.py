@@ -96,15 +96,18 @@ def test_workflow_matches_direct_pipeline(path: Path, inventory: SQLiteInventory
 
 
 def test_outcome_summary(inventory: SQLiteInventory) -> None:
+    # One workflow for the whole batch: its default payment function blocks repeat invoice numbers,
+    # so the second copy of 1011/1012 and the 1004 revision are not paid again.
     workflow = build_workflow(inventory)
     statuses = {p.name: run_invoice(p, workflow)["status"] for p in SAMPLES}
-    completed = {name for name, s in statuses.items() if s is PipelineStatus.COMPLETED}
-    assert completed == {
-        "invoice_1001.txt", "invoice_1004.json", "invoice_1004_revised.json", "invoice_1006.csv",
-        "invoice_1010.txt", "invoice_1011.txt", "invoice_1011.pdf", "invoice_1012.txt", "invoice_1012.pdf",
-        "invoice_1014.xml", "invoice_1015.csv",
+    by_status = {s: {name for name, st in statuses.items() if st is s} for s in PipelineStatus}
+
+    assert by_status[PipelineStatus.COMPLETED] == {
+        "invoice_1001.txt", "invoice_1004.json", "invoice_1006.csv", "invoice_1010.txt", "invoice_1011.pdf",
+        "invoice_1012.pdf", "invoice_1014.xml", "invoice_1015.csv",
     }
-    assert all(s is PipelineStatus.REJECTED for name, s in statuses.items() if name not in completed)
+    assert by_status[PipelineStatus.FAILED] == {"invoice_1004_revised.json", "invoice_1011.txt", "invoice_1012.txt"}
+    assert len(by_status[PipelineStatus.REJECTED]) == 9
 
 
 # --------------------------------------------------------------------------- #

@@ -228,7 +228,8 @@ def _invoice(number: str = "INV-1001") -> Invoice:
 
 
 def _approval(decision: ApprovalDecision, number: str = "INV-1001") -> ApprovalResult:
-    return ApprovalResult(invoice_number=number, decision=decision, reasoning="Test decision.")
+    return ApprovalResult(invoice_number=number, decision=decision, reasoning="Test decision.",
+                          reviewed_vendor="Widgets Inc.", reviewed_amount=Decimal("5000.00"), reviewed_currency="USD")
 
 
 def test_authorize_payment_for_approved_valid_invoice() -> None:

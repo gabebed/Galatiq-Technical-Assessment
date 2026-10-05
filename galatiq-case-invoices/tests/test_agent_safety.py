@@ -149,9 +149,14 @@ def test_payment_step_never_pays_approved_but_invalid_invoice(use_llm: bool, inv
     assert "Validation failed" in update["payment"].message
 
 
+APPROVED_1001 = ApprovalResult(invoice_number="INV-1001", decision=ApprovalDecision.APPROVED, reasoning="OK.",
+                               reviewed_vendor="Widgets Inc.", reviewed_amount=Decimal("5000.00"),
+                               reviewed_currency="USD")
+
+
 def test_payment_step_pays_only_the_authorized_payment_despite_attacks() -> None:
     spy, llm = SpyPayment(), AdversarialLLM()
-    approval = ApprovalResult(invoice_number="INV-1001", decision=ApprovalDecision.APPROVED, reasoning="OK.")
+    approval = APPROVED_1001
     update = payment_step(_invoice(), ValidationResult(invoice_number="INV-1001"), approval, pay=spy, llm=llm)
 
     assert spy.calls == [("Widgets Inc.", Decimal("5000.00"), "USD", "INV-1001")]
@@ -165,7 +170,7 @@ def test_payment_step_pays_only_the_authorized_payment_despite_attacks() -> None
 
 def test_misbehaving_payment_agent_exhausts_its_budget_and_pays_nothing() -> None:
     spy, llm = SpyPayment(), AdversarialLLM(scripts={"payment": _relentless_attacks})
-    approval = ApprovalResult(invoice_number="INV-1001", decision=ApprovalDecision.APPROVED, reasoning="OK.")
+    approval = APPROVED_1001
     update = payment_step(_invoice(), ValidationResult(invoice_number="INV-1001"), approval, pay=spy, llm=llm)
 
     assert spy.calls == []

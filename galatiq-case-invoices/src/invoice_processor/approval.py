@@ -167,6 +167,7 @@ class RuleBasedApprover:
             requires_additional_scrutiny=scrutiny,
             flags=list(dict.fromkeys(flags)),
             reviewer=self.reviewer,
+            **reviewed_terms(invoice),
         )
 
 
@@ -174,26 +175,44 @@ def _describe(issue: ValidationIssue) -> str:
     return f"[{issue.code.value}] {issue.message}"
 
 
+def reviewed_terms(invoice: Invoice) -> dict[str, object]:
+    """The invoice terms an approval decision is bound to."""
+    return {
+        "reviewed_vendor": invoice.vendor_name,
+        "reviewed_amount": invoice.total,
+        "reviewed_currency": invoice.currency,
+    }
+
+
 def enforce_hard_rules(
     invoice: Invoice, validation: ValidationResult, result: ApprovalResult, policy: ApprovalPolicy
 ) -> ApprovalResult:
-    """Correct any approver output that violates non-negotiable rules."""
-    updates: dict[str, object] = {}
-    failures = hard_failures(invoice, validation)
-    if result.is_approved and failures:
-        logger.error("%s: approver %s approved an invoice with hard failures; overriding",
-                     invoice.invoice_number, result.reviewer)
+    """Correct any approver output that violates non-negotiable rules, and bind it to the invoice's terms."""
+    reasons: list[str] = []
+    if result.is_approved:
+        reasons.extend(hard_failures(invoice, validation))
+        if result.invoice_number != invoice.invoice_number:
+            reasons.append(f"The approver returned a decision for {result.invoice_number!r}, "
+                           f"not for invoice {invoice.invoice_number!r}.")
+        if result.reviewed_amount is not None and not result.covers_terms(invoice):
+            reasons.append(
+                f"The approver approved {result.reviewed_amount} {result.reviewed_currency} to "
+                f"{result.reviewed_vendor!r}, but the invoice is {invoice.total} {invoice.currency} to "
+                f"{invoice.vendor_name!r}."
+            )
+
+    updates: dict[str, object] = {"invoice_number": invoice.invoice_number, **reviewed_terms(invoice)}
+    if reasons:
+        logger.error("%s: overriding approval from %s: %s", invoice.invoice_number, result.reviewer, reasons)
         updates["decision"] = ApprovalDecision.REJECTED
         updates["reasoning"] = "\n".join(
-            [result.reasoning, "Overridden to REJECTED: hard failures cannot be approved:"]
-            + [f"- {reason}" for reason in failures]
+            [result.reasoning, "Overridden to REJECTED: this approval cannot stand:"]
+            + [f"- {reason}" for reason in reasons]
         )
         updates["flags"] = [*result.flags, FLAG_OVERRIDDEN]
     if policy.requires_scrutiny(invoice) and not result.requires_additional_scrutiny:
         updates["requires_additional_scrutiny"] = True
-    if result.invoice_number != invoice.invoice_number:
-        updates["invoice_number"] = invoice.invoice_number
-    return result.model_copy(update=updates) if updates else result
+    return result.model_copy(update=updates)
 
 
 def approve_invoice(

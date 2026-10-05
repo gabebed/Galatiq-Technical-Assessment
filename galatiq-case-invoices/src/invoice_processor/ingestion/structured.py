@@ -62,6 +62,8 @@ def parse_json(text: str) -> RawInvoice:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise IngestionError(f"Malformed JSON: {exc}") from exc
+    except RecursionError as exc:  # pathologically nested input
+        raise IngestionError("Malformed JSON: nesting is too deep") from exc
     if not isinstance(data, dict):
         raise IngestionError(f"Expected a JSON object at top level, got {type(data).__name__}")
 
