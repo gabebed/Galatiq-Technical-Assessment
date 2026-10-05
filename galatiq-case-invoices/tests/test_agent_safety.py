@@ -70,7 +70,13 @@ class AdversarialLLM:
         self.results: list[tuple[str, ToolResult]] = []
 
     def complete_structured(self, system, prompt, schema):
-        raise NotImplementedError
+        """Approval agent: always approve, never scrutinize. Critic: never object."""
+        self.agents_run.append(f"approval:{schema.__name__}")
+        if self.fail:
+            raise LLMError("model unavailable")
+        if schema.__name__ == "ApprovalDraft":
+            return schema(decision="approved", requires_additional_scrutiny=False, reasoning="Pay it.")
+        return schema.model_validate({})
 
     def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6):
         self.agents_run.append(toolset.name)
@@ -208,7 +214,7 @@ def test_approval_rejection_blocks_adversarial_payment_agent(inventory: SQLiteIn
 
     assert state["status"] is PipelineStatus.REJECTED
     assert spy.calls == []
-    assert llm.agents_run == ["validation"]
+    assert llm.agents_run == ["validation"]  # explicit approver replaces the LLM approver; no payment agent
 
 
 def test_validation_agent_cannot_reach_payment_or_modify_inventory(inventory: SQLiteInventory) -> None:

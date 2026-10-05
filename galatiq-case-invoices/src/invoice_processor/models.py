@@ -193,6 +193,9 @@ class ApprovalResult(_Model):
     requires_additional_scrutiny: bool = Field(default=False, description="e.g. total above the $10K threshold.")
     flags: list[NonEmptyText] = Field(default_factory=list, description="Policy rules that fired.")
     reviewer: NonEmptyText = "vp-approval"
+    review_trail: list[NonEmptyText] = Field(
+        default_factory=list, description="Drafts and critiques from a reflective approval loop, in order."
+    )
     decided_at: datetime = Field(default_factory=_utc_now)
 
     @property

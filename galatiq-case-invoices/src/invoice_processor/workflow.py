@@ -29,6 +29,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from invoice_processor.agents import PaymentReport, ValidationReview, review_validation, run_payment_agent
 from invoice_processor.approval import ApprovalPolicy, Approver, approve_invoice
+from invoice_processor.approval_agent import LLMApprover
 from invoice_processor.database import InventoryDatabaseError
 from invoice_processor.ingestion import IngestionError, extract_invoice
 from invoice_processor.inventory import InventoryLookup
@@ -133,7 +134,12 @@ def build_workflow(
     policy: ApprovalPolicy | None = None,
     llm: LLMClient | None = None,
 ) -> CompiledStateGraph:
-    """Compile the invoice-processing graph with the given tools (and optional LLM agents)."""
+    """Compile the invoice-processing graph with the given tools (and optional LLM agents).
+
+    With ``llm`` and no explicit ``approver``, approval uses ``LLMApprover`` (draft -> critique -> revise).
+    """
+    if approver is None and llm is not None:
+        approver = LLMApprover(llm, policy)
 
     def ingest(state: InvoiceState) -> InvoiceState:
         try:

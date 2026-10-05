@@ -59,6 +59,25 @@ def test_grok_agents_with_tools(tmp_path: Path) -> None:
     assert "tool_calls" not in rejected or not rejected["tool_calls"]
 
 
+def test_grok_reflective_approval(tmp_path: Path) -> None:
+    from invoice_processor.approval import approve_invoice
+    from invoice_processor.approval_agent import LLMApprover
+    from invoice_processor.ingestion import extract_invoice
+    from invoice_processor.validation import validate_invoice
+
+    invoice = extract_invoice(INVOICES / "invoice_1012.txt")  # $9,975 with two OCR warnings
+    validation = validate_invoice(invoice, SQLiteInventory(init_db(tmp_path / "inventory.db")))
+    result = approve_invoice(invoice, validation, approver=LLMApprover(create_llm_client()))
+
+    for step in result.review_trail:
+        print(step)
+    assert result.decision.value == "approved"
+    assert result.requires_additional_scrutiny is False
+    assert result.review_trail[0].startswith("Draft 1")
+    assert result.review_trail[-1].startswith(("Critique", "Draft"))
+    assert len(result.review_trail) <= 5
+
+
 def test_grok_returns_structured_output() -> None:
     client = create_llm_client()
     answer = client.complete_structured(
