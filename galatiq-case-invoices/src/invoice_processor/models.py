@@ -96,6 +96,10 @@ class Invoice(_Model):
     payment_terms: OptionalText = None
     notes: OptionalText = None
     source_file: OptionalText = Field(default=None, description="Path of the document this was extracted from.")
+    extraction_warnings: list[NonEmptyText] = Field(
+        default_factory=list,
+        description="Values that were unparseable or corrected during ingestion.",
+    )
 
     @property
     def computed_subtotal(self) -> Decimal | None:
