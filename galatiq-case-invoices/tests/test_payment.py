@@ -159,6 +159,33 @@ def test_mock_payment_refuses_invalid_input(vendor: str, amount: object) -> None
 
 
 # --------------------------------------------------------------------------- #
+# Duplicate payment guard
+# --------------------------------------------------------------------------- #
+
+
+def test_duplicate_guard_blocks_second_payment_for_same_invoice() -> None:
+    from invoice_processor.payment import DuplicatePaymentGuard
+
+    spy = SpyPayment()
+    guard = DuplicatePaymentGuard(spy)
+    first = guard("Precision Parts Ltd.", Decimal("1890.00"), invoice_number="INV-1004")
+    revised = guard("Precision Parts Ltd.", Decimal("5940.00"), invoice_number="INV-1004")
+    other = guard("Widgets Inc.", Decimal("5000.00"), invoice_number="INV-1001")
+
+    assert [r.status for r in (first, revised, other)] == [PaymentStatus.PAID, PaymentStatus.FAILED, PaymentStatus.PAID]
+    assert len(spy.calls) == 2
+    assert first.transaction_id in revised.message
+
+
+def test_duplicate_guard_allows_retry_after_failed_payment() -> None:
+    from invoice_processor.payment import DuplicatePaymentGuard
+
+    guard = DuplicatePaymentGuard(mock_payment)
+    assert guard("", Decimal("10"), invoice_number="INV-1").status is PaymentStatus.FAILED
+    assert guard("Vendor", Decimal("10"), invoice_number="INV-1").status is PaymentStatus.PAID
+
+
+# --------------------------------------------------------------------------- #
 # Integration: payment is called for exactly the approved sample invoices
 # --------------------------------------------------------------------------- #
 

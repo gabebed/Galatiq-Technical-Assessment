@@ -51,6 +51,38 @@ def mock_payment(
     )
 
 
+class DuplicatePaymentGuard:
+    """``PaymentFunction`` wrapper that refuses to pay an invoice number twice.
+
+    Covers re-submitted or revised invoices (e.g. INV-1004 and its revision R1)
+    within one process. State is in memory only; a persistent ledger would be
+    needed across runs.
+    """
+
+    def __init__(self, pay: PaymentFunction = mock_payment) -> None:
+        self._pay = pay
+        self._paid: dict[str, PaymentResult] = {}
+
+    def __call__(
+        self, vendor: str, amount: Decimal, *, currency: str = "USD", invoice_number: str | None = None
+    ) -> PaymentResult:
+        previous = self._paid.get(invoice_number) if invoice_number else None
+        if previous is not None:
+            logger.warning("Duplicate payment blocked for %s (already paid in %s)",
+                           invoice_number, previous.transaction_id)
+            return PaymentResult(
+                invoice_number=invoice_number, status=PaymentStatus.FAILED, vendor_name=vendor, amount=amount,
+                currency=currency,
+                message=(f"Duplicate payment blocked: invoice {invoice_number} was already paid "
+                         f"{previous.amount:,.2f} {previous.currency} (transaction {previous.transaction_id}). "
+                         "A revised or resubmitted invoice needs manual reconciliation."),
+            )
+        result = self._pay(vendor, amount, currency=currency, invoice_number=invoice_number)
+        if invoice_number and result.status is PaymentStatus.PAID:
+            self._paid[invoice_number] = result
+        return result
+
+
 def payment_blockers(
     invoice: Invoice, validation: ValidationResult, approval: ApprovalResult | None
 ) -> list[str]:

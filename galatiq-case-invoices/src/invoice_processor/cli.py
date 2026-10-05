@@ -1,0 +1,152 @@
+"""Command-line interface: python main.py --invoice_path=<file or directory>"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from collections.abc import Sequence
+from enum import IntEnum
+from pathlib import Path
+
+from invoice_processor.database import DEFAULT_DB_PATH
+from invoice_processor.ingestion import SUPPORTED_EXTENSIONS
+from invoice_processor.inventory import SQLiteInventory
+from invoice_processor.llm import LLMClient, LLMError, create_llm_client
+from invoice_processor.payment import DuplicatePaymentGuard, mock_payment
+from invoice_processor.report import format_result, format_summary, to_json
+from invoice_processor.workflow import InvoiceState, PipelineStatus, build_workflow, run_invoice
+
+logger = logging.getLogger("invoice_processor.cli")
+
+
+class ExitCode(IntEnum):
+    ALL_PAID = 0
+    SOME_REJECTED = 1
+    USAGE_ERROR = 2
+    SOME_FAILED = 3
+    UNEXPECTED_ERROR = 4
+    INTERRUPTED = 130
+
+
+EPILOG = """exit codes:
+  0  every invoice was approved and paid
+  1  processing completed; at least one invoice was rejected
+  2  invalid arguments or setup (bad path, no invoices, missing database or API key)
+  3  at least one invoice could not be processed (unreadable file, payment failure, ...)
+  4  unexpected internal error
+"""
+
+
+class InputError(Exception):
+    """Invalid user input or setup; reported without a traceback."""
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="main.py", description="Process invoices: extract, validate, approve, and pay.",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--invoice_path", "--invoice-path", dest="invoice_path", required=True, type=Path,
+                        help="an invoice file, or a directory of invoice files")
+    parser.add_argument("--db-path", type=Path, default=DEFAULT_DB_PATH,
+                        help=f"SQLite inventory database (default: {DEFAULT_DB_PATH.name} in the project root)")
+    parser.add_argument("--llm", choices=("auto", "on", "off"), default="auto",
+                        help="use LLM agents: 'auto' uses them when XAI_API_KEY is set (default: auto)")
+    parser.add_argument("--json", action="store_true", help="print machine-readable JSON instead of a report")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="log to stderr (-v info, -vv debug)")
+    return parser
+
+
+def collect_invoices(path: Path) -> list[Path]:
+    if not path.exists():
+        raise InputError(f"Invoice path does not exist: {path}")
+    supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+    if path.is_file():
+        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            raise InputError(f"Unsupported invoice file type {path.suffix!r} (supported: {supported})")
+        return [path]
+    files = sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS)
+    if not files:
+        raise InputError(f"No invoice files ({supported}) found in {path}")
+    return files
+
+
+def _select_llm(mode: str) -> LLMClient | None:
+    if mode == "off" or (mode == "auto" and not os.environ.get("XAI_API_KEY", "").strip()):
+        return None
+    try:
+        return create_llm_client()
+    except LLMError as exc:
+        if mode == "on":
+            raise InputError(str(exc)) from exc
+        logger.warning("LLM unavailable, continuing deterministically: %s", exc)
+        return None
+
+
+def _exit_code(states: Sequence[InvoiceState]) -> ExitCode:
+    statuses = [s.get("status") for s in states]
+    if any(s is not PipelineStatus.COMPLETED and s is not PipelineStatus.REJECTED for s in statuses):
+        return ExitCode.SOME_FAILED
+    if PipelineStatus.REJECTED in statuses:
+        return ExitCode.SOME_REJECTED
+    return ExitCode.ALL_PAID
+
+
+def _configure_output(verbosity: int) -> None:
+    # Errors are already rendered in the report; logs are opt-in to avoid duplicate output.
+    level = logging.CRITICAL if verbosity == 0 else logging.INFO if verbosity == 1 else logging.DEBUG
+    logging.basicConfig(level=level, stream=sys.stderr, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")  # never crash on characters the console cannot show
+
+
+def run(args: argparse.Namespace) -> ExitCode:
+    files = collect_invoices(args.invoice_path)
+    if not args.db_path.is_file():
+        raise InputError(f"Inventory database not found at {args.db_path}. Run: python scripts/init_db.py")
+
+    llm = _select_llm(args.llm)
+    pay = DuplicatePaymentGuard(mock_payment)  # never pay the same invoice number twice in one run
+    workflow = build_workflow(SQLiteInventory(args.db_path), pay=pay, llm=llm)
+    mode = f"LLM agents ({llm!r})" if llm else "deterministic (no LLM)"
+
+    results: list[tuple[Path, InvoiceState]] = []
+    if not args.json:
+        print(f"Processing {len(files)} invoice(s) | mode: {mode} | inventory: {args.db_path}\n")
+    for path in files:
+        try:
+            state = run_invoice(path, workflow)
+        except Exception as exc:  # isolate failures: one bad invoice must not stop the batch
+            logger.exception("Unexpected error processing %s", path)
+            state = {"status": PipelineStatus.FAILED, "error": f"Unexpected error: {type(exc).__name__}: {exc}"}
+        results.append((path, state))
+        if not args.json:
+            print(format_result(path, state), end="\n\n", flush=True)
+
+    if args.json:
+        print(json.dumps({"mode": mode, "invoices": [to_json(p, s) for p, s in results]}, indent=2))
+    elif len(results) > 1:
+        print(format_summary(results))
+    return _exit_code([s for _, s in results])
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    _configure_output(args.verbose)
+    try:
+        return run(args)
+    except InputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return ExitCode.USAGE_ERROR
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return ExitCode.INTERRUPTED
+    except Exception as exc:
+        logger.debug("Unexpected error", exc_info=True)
+        print(f"unexpected error: {type(exc).__name__}: {exc}" + ("" if args.verbose else " (use -v for details)"),
+              file=sys.stderr)
+        return ExitCode.UNEXPECTED_ERROR
