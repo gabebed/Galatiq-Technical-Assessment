@@ -28,13 +28,20 @@ class LLMError(RuntimeError):
 
 
 class LLMClient(Protocol):
-    def complete_structured(self, system: str, prompt: str, schema: type[T]) -> T:
-        """Send a system + user prompt and return a validated instance of ``schema``."""
+    def complete_structured(self, system: str, prompt: str, schema: type[T], *, agent: str = "unspecified") -> T:
+        """Send a system + user prompt and return a validated instance of ``schema``.
+
+        ``agent`` names the caller in request telemetry (e.g. "approval:draft").
+        """
         ...
 
-    def run_tools(self, system: str, prompt: str, toolset: Toolset, schema: type[T], *, max_rounds: int = 6) -> T:
+    def run_tools(
+        self, system: str, prompt: str, toolset: Toolset, schema: type[T], *,
+        max_rounds: int = 6, agent: str | None = None,
+    ) -> T:
         """Let the model call tools from ``toolset`` (only via ``Toolset.invoke``), then
-        return its final answer as a validated instance of ``schema``."""
+        return its final answer as a validated instance of ``schema``. ``agent`` defaults to
+        the toolset name."""
         ...
 
 

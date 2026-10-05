@@ -59,7 +59,7 @@ def review_validation(
         f"Invoice (extracted):\n{invoice.model_dump_json(indent=2, exclude={'source_file'})}\n\n"
         f"Deterministic validation result:\n{validation.model_dump_json(indent=2)}"
     )
-    review = llm.run_tools(VALIDATION_SYSTEM, prompt, toolset, ValidationReview)
+    review = llm.run_tools(VALIDATION_SYSTEM, prompt, toolset, ValidationReview, agent="validation")
     return review, list(toolset.calls)
 
 
@@ -75,7 +75,7 @@ def run_payment_agent(
     report: PaymentReport | None = None
     failure = None
     try:
-        report = llm.run_tools(PAYMENT_SYSTEM, prompt, toolset, PaymentReport, max_rounds=3)
+        report = llm.run_tools(PAYMENT_SYSTEM, prompt, toolset, PaymentReport, max_rounds=3, agent="payment")
     except Exception as exc:  # any failure, possibly *after* money moved: the tool's record is the truth
         failure = f"Payment agent error: {type(exc).__name__}: {exc}"
         logger.error("Payment agent failed for %s: %s", authorization.invoice_number, failure)

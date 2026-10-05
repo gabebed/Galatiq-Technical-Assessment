@@ -41,7 +41,7 @@ class ScriptedLLM:
         self.fail = fail
         self.calls: list[tuple[str, str, str]] = []  # (schema, system, prompt)
 
-    def complete_structured(self, system, prompt, schema):
+    def complete_structured(self, system, prompt, schema, *, agent=None):
         self.calls.append((schema.__name__, system, prompt))
         if self.fail:
             raise LLMError("xAI request failed (UNAVAILABLE): offline")

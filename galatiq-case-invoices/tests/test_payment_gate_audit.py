@@ -68,14 +68,14 @@ class AgentLLM:
         self.draft = draft
         self.agents_run: list[str] = []
 
-    def complete_structured(self, system, prompt, schema):
+    def complete_structured(self, system, prompt, schema, *, agent=None):
         if schema.__name__ == "ApprovalDraft":
             return schema(decision=self.draft, requires_additional_scrutiny=False,
                           reasoning="Total is not greater than the $10,000.00 threshold and validation passed "
                                     "with no errors or warnings, so this decision follows policy.")
         return schema.model_validate({})  # critic: no findings
 
-    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6):
+    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6, agent=None):
         self.agents_run.append(toolset.name)
         if toolset.name == "validation":
             toolset.invoke("mock_payment", {"vendor": "Evil Corp", "amount": "1000000"})

@@ -34,6 +34,7 @@ from invoice_processor.database import InventoryDatabaseError
 from invoice_processor.ingestion import IngestionError, extract_invoice
 from invoice_processor.inventory import InventoryLookup
 from invoice_processor.llm import LLMClient
+from invoice_processor.llm.telemetry import LLMCallRecord
 from invoice_processor.models import (
     ApprovalResult,
     Invoice,
@@ -75,6 +76,7 @@ class InvoiceState(TypedDict, total=False):
     error: str
     tool_calls: Annotated[list[ToolCallRecord], operator.add]  # audit trail across agents
     agent_errors: Annotated[list[str], operator.add]
+    llm_calls: list[LLMCallRecord]  # added by the CLI: every LLM request made for this invoice
 
 
 class WorkflowInput(TypedDict):
@@ -177,7 +179,8 @@ def build_workflow(
                 update["validation_review"] = review
                 update["tool_calls"] = calls
             except Exception as exc:  # advisory: any agent failure leaves the deterministic result standing
-                logger.warning("Validation agent unavailable for %s: %s", invoice.invoice_number, exc)
+                logger.error("Validation agent FAILED for %s; the deterministic validation result stands: %s",
+                             invoice.invoice_number, exc)
                 update["agent_errors"] = [f"validation agent: {exc}"]
         return update
 

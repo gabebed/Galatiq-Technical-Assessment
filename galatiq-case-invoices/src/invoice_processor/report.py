@@ -7,6 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from invoice_processor.approval_agent import FLAG_LLM_UNAVAILABLE
+from invoice_processor.llm.telemetry import LLMCallRecord
 from invoice_processor.models import PaymentStatus, Severity
 from invoice_processor.workflow import InvoiceState, PipelineStatus
 
@@ -78,7 +80,9 @@ def _field(label: str, value: object) -> str:
     return f"  {label:<14}{value if value not in (None, '') else '-'}"
 
 
-def format_result(path: Path, state: InvoiceState) -> str:
+def format_result(path: Path, state: InvoiceState, *, show_llm_calls: bool = True) -> str:
+    """Render one invoice. ``show_llm_calls=False`` omits the per-request LLM table; LLM failures
+    are always shown."""
     invoice = state.get("invoice")
     number = invoice.invoice_number if invoice and invoice.invoice_number else "(no invoice ID)"
     title = f"{number}  |  {path.name}"
@@ -170,14 +174,14 @@ def format_result(path: Path, state: InvoiceState) -> str:
             outcome = "ok" if call.ok else f"refused: {call.error}"
             out += _wrap(f"{call.toolset}.{call.tool}({call.arguments}) -> {outcome}", 2)
 
+    out += _llm_section(state, show_calls=show_llm_calls)
+
     if state.get("error") and not (payment is not None and state["error"] == payment.message):
         out += ["", "ERROR"] + _wrap(state["error"], 2)
-    for error in state.get("agent_errors") or []:
-        out += _wrap(f"Agent unavailable: {error}", 2)
     return _plain("\n".join(out))
 
 
-def format_summary(results: list[tuple[Path, InvoiceState]]) -> str:
+def format_summary(results: list[tuple[Path, InvoiceState]], *, show_llm_calls: bool = True) -> str:
     counts = {label: 0 for label in ("PAID", "REJECTED", "FAILED")}
     rows = []
     for path, state in results:
@@ -190,7 +194,64 @@ def format_summary(results: list[tuple[Path, InvoiceState]]) -> str:
     head = (f"SUMMARY  {len(results)} invoice(s): {counts['PAID']} paid, {counts['REJECTED']} rejected, "
             f"{counts['FAILED']} failed")
     columns = f"  {'Invoice':<12}{'File':<28}{'Result':<10}{'Total':>16}   Reason"
-    return _plain("\n".join([_RULE, head, _RULE, columns, *rows]))
+    lines = [_RULE, head, _RULE, columns, *rows]
+    all_calls = [c for _, state in results for c in state.get("llm_calls") or []]
+    if all_calls and show_llm_calls:
+        lines += ["", f"  LLM: {_llm_totals(all_calls)}"]
+    affected = [path.name for path, state in results if llm_fallbacks(state)]
+    if affected:
+        lines.append(f"  LLM failures with fallback in {len(affected)} invoice(s): {', '.join(affected)}")
+    return _plain("\n".join(lines))
+
+
+def llm_fallbacks(state: InvoiceState) -> list[str]:
+    """Where an LLM agent failed and the system fell back or stopped, in plain words."""
+    notes = [f"Validation agent failed; the deterministic validation result was used ({error.split(': ', 1)[-1]})."
+             for error in state.get("agent_errors") or []]
+    approval = state.get("approval")
+    if approval is not None and FLAG_LLM_UNAVAILABLE in approval.flags:
+        notes.append("Approval agent failed; the deterministic policy decision was used (details in the reasoning).")
+    payment = state.get("payment")
+    if payment is not None and (payment.message or "").startswith("Payment agent did not execute the payment"):
+        notes.append(f"Payment agent failed; the invoice was NOT paid ({payment.message}).")
+    return notes
+
+
+def _llm_totals(calls: list[LLMCallRecord]) -> str:
+    failed = sum(not c.success for c in calls)
+    targets = ", ".join(sorted({f"{c.provider}/{c.model}" for c in calls}))
+    tokens_in = sum(c.prompt_tokens or 0 for c in calls)
+    tokens_out = sum(c.completion_tokens or 0 for c in calls)
+    cost = sum(c.cost_usd or 0 for c in calls)
+    return (f"{len(calls)} request(s) to {targets}: {len(calls) - failed} ok, {failed} failed | "
+            f"tokens {tokens_in:,} in / {tokens_out:,} out | cost ${cost:.4f}")
+
+
+def _llm_section(state: InvoiceState, *, show_calls: bool = True) -> list[str]:
+    calls = state.get("llm_calls") or []
+    fallbacks = llm_fallbacks(state)
+    out: list[str] = []
+    if calls and show_calls:
+        out += ["", f"LLM CALLS  {_llm_totals(calls)}",
+                f"  {'#':<4}{'time':<10}{'agent':<17}{'operation':<18}{'secs':>5}  {'tokens in->out':>15}  "
+                f"{'structured':<14} result"]
+        for call in calls:
+            tokens = (f"{call.prompt_tokens:,}->{call.completion_tokens:,}"
+                      if call.prompt_tokens is not None else "n/a")
+            out.append(
+                f"  {call.sequence:<4}{call.started_at.astimezone():%H:%M:%S}  {call.agent:<17}{call.operation:<18}"
+                f"{call.duration_ms / 1000:>5.1f}  {tokens:>15}  {call.structured_output:<14} "
+                f"{'ok' if call.success else 'FAILED'}"
+            )
+            if call.request_id:
+                out.append(f"      request id {call.request_id}")
+            if call.error:
+                out += _wrap(f"error: {call.error}", 6, hanging=7)
+    if fallbacks:
+        out += ["", "LLM FAILURES"]
+        for note in fallbacks:
+            out += _wrap(f"! {note}", 2, hanging=2)
+    return out
 
 
 def to_json(path: Path, state: InvoiceState) -> dict[str, Any]:
@@ -210,4 +271,6 @@ def to_json(path: Path, state: InvoiceState) -> dict[str, Any]:
         "error": state.get("error"),
         "agent_errors": state.get("agent_errors") or [],
         "tool_calls": [c.model_dump(mode="json") for c in state.get("tool_calls") or []],
+        "llm_calls": [c.model_dump(mode="json") for c in state.get("llm_calls") or []],
+        "llm_fallbacks": llm_fallbacks(state),
     }

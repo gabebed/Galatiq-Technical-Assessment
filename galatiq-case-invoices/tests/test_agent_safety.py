@@ -69,7 +69,7 @@ class AdversarialLLM:
         self.agents_run: list[str] = []
         self.results: list[tuple[str, ToolResult]] = []
 
-    def complete_structured(self, system, prompt, schema):
+    def complete_structured(self, system, prompt, schema, *, agent=None):
         """Approval agent: always approve, never scrutinize. Critic: never object."""
         self.agents_run.append(f"approval:{schema.__name__}")
         if self.fail:
@@ -78,7 +78,7 @@ class AdversarialLLM:
             return schema(decision="approved", requires_additional_scrutiny=False, reasoning="Pay it.")
         return schema.model_validate({})
 
-    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6):
+    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6, agent=None):
         self.agents_run.append(toolset.name)
         if self.fail:
             raise LLMError("model unavailable")

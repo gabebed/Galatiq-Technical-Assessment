@@ -127,6 +127,7 @@ invoice-processor --invoice_path=data/invoices/                    # same CLI, i
 | `--json` | Print structured JSON results instead of the human-readable report. |
 | `-v` / `-vv` | Info / debug logs on stderr. |
 | `--log-format {text,json}` | Log format; `json` emits one object per line, tagged with the invoice. |
+| `--llm-log` / `--no-llm-log` | Show every LLM request: a start/end line on stderr and an **LLM CALLS** table per invoice (default: on). `--no-llm-log` hides successful requests; failed requests and **LLM FAILURES** are always shown. |
 
 **Exit codes:** `0` all paid · `1` at least one rejected · `2` invalid input or setup (bad path, missing
 database or API key) · `3` at least one invoice could not be processed (unreadable file, payment failure,
@@ -399,8 +400,31 @@ approval draft plus critique, payment). Invoices rejected at validation make no 
   {"ts": "2026-10-05T20:35:04.983+00:00", "level": "INFO", "logger": "invoice_processor.validation",
    "invoice": "invoice_1002.txt", "message": "Validated INV-1002: INVALID (1 errors, 1 warnings)"}
   ```
-  Logs cover each stage, every tool call (with refusals), LLM token usage and cost, approval overrides,
-  per-invoice timing, and a run summary.
+  Logs cover each stage, every tool call (with refusals), approval overrides, per-invoice timing, and a
+  run summary.
+- **LLM requests.** Every request to xAI is logged by the client wrapper itself
+  ([llm/telemetry.py](src/invoice_processor/llm/telemetry.py)), with one line immediately before the API
+  call and one immediately after. Each line includes:
+  - agent, provider, and model
+  - start and completion time
+  - whether the call succeeded
+  - the xAI request ID
+  - token usage and cost
+  - whether the structured output parsed
+
+  In LLM mode these lines appear on stderr even without `-v`, and the report lists them per invoice under
+  **LLM CALLS**. Use `--no-llm-log` to hide them:
+  ```text
+  LLM request #4 START  agent=approval:draft provider=xai model=grok-4.7 op=structured schema=ApprovalDraft
+  LLM request #4 OK agent=approval:draft provider=xai model=grok-4.7 op=structured structured=parsed
+      id=9e46d08a-9357-9325-bf64-8480b2a9b74d tokens=1877->201 cost_usd=0.006532 duration_ms=8656
+  ```
+  Prompts, model output, and API keys are never logged. Schema failures record only the failing field
+  paths.
+- **LLM failures are never silent.** Failed requests are logged at ERROR. Each affected invoice gets an
+  **LLM FAILURES** section, for example "Approval agent failed; the deterministic policy decision was
+  used", or "Payment agent failed; the invoice was NOT paid". The run ends with a warning on stderr,
+  which is printed at any verbosity.
 
 ---
 

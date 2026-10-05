@@ -103,7 +103,7 @@ def _make_validation(invoice: Invoice, valid: bool) -> ValidationResult:
 class HonestPaymentLLM:
     """Payment agent that pays exactly what it is told; used to exercise the agent path."""
 
-    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6):
+    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6, agent=None):
         auth = toolset.authorization
         toolset.invoke("mock_payment", {"vendor": auth.vendor, "amount": str(auth.amount)})
         return schema(summary="paid")
@@ -261,7 +261,7 @@ class FaultyLLM:
         if self.fail_at == point:
             raise self.exc
 
-    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6):
+    def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6, agent=None):
         if toolset.name == "validation":
             self._maybe_fail("validation")
             return schema(summary="Looks fine.")
@@ -271,7 +271,7 @@ class FaultyLLM:
         self._maybe_fail("payment-after")
         return schema(summary="Paid.")
 
-    def complete_structured(self, system, prompt, schema):
+    def complete_structured(self, system, prompt, schema, *, agent=None):
         self._maybe_fail("approval")
         if schema.__name__ == "ApprovalDraft":
             return schema(decision="approved", requires_additional_scrutiny=False,
@@ -402,7 +402,7 @@ def test_prompt_injection_in_invoice_cannot_redirect_payment(inventory, tmp_path
             self.prompts: list[str] = []
             self.results = []
 
-        def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6):
+        def run_tools(self, system, prompt, toolset, schema, *, max_rounds=6, agent=None):
             self.prompts.append(prompt)
             if "Evil Corp" in prompt:
                 self.results.append(toolset.invoke("mock_payment", {"vendor": "Evil Corp", "amount": "99999"}))

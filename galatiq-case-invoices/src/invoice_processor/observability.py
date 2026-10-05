@@ -46,6 +46,8 @@ class JsonFormatter(logging.Formatter):
             "invoice": getattr(record, "invoice", "-"),
             "message": record.getMessage(),
         }
+        if isinstance(llm := getattr(record, "llm", None), dict):  # structured LLM request telemetry
+            entry["llm"] = llm
         if record.exc_info:
             entry["exception"] = self.formatException(record.exc_info)
         return json.dumps(entry, default=str)

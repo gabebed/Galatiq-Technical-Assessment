@@ -204,7 +204,7 @@ class LLMApprover:
         trail: list[str] = []
 
         try:
-            draft = self.llm.complete_structured(AGENT_SYSTEM, context, ApprovalDraft)
+            draft = self.llm.complete_structured(AGENT_SYSTEM, context, ApprovalDraft, agent="approval:draft")
             trail.append(_describe_draft(1, draft))
             unresolved = False
             for round_number in range(1, self.critique_rounds + 1):
@@ -219,7 +219,8 @@ class LLMApprover:
         except Exception as exc:  # LLMError or any client defect: the deterministic decision is always safe
             if not isinstance(exc, LLMError):
                 logger.exception("Approval agent crashed for %s", invoice.invoice_number)
-            logger.warning("Approval agent unavailable for %s: %s", invoice.invoice_number, exc)
+            logger.error("Approval agent FAILED for %s; falling back to the deterministic policy decision: %s",
+                         invoice.invoice_number, exc)
             return baseline.model_copy(update={
                 "flags": [*baseline.flags, FLAG_LLM_UNAVAILABLE],
                 "reasoning": f"{baseline.reasoning}\n(LLM approval agent unavailable: {exc}. "
@@ -234,7 +235,7 @@ class LLMApprover:
     ) -> Critique:
         findings = deterministic_findings(draft, facts, validation, self.min_reasoning_chars)
         prompt = f"{context}\n\n{_facts_text(facts)}\n\nDRAFT DECISION\n{draft.model_dump_json(indent=2)}"
-        llm_findings = self.llm.complete_structured(CRITIC_SYSTEM, prompt, Critique).findings
+        llm_findings = self.llm.complete_structured(CRITIC_SYSTEM, prompt, Critique, agent="approval:critic").findings
         seen = {(f.category, f.detail) for f in findings}
         findings.extend(f for f in llm_findings if (f.category, f.detail) not in seen)
         return Critique(findings=findings)
@@ -244,7 +245,7 @@ class LLMApprover:
             f"{context}\n\nYOUR PREVIOUS DRAFT\n{draft.model_dump_json(indent=2)}\n\n"
             f"REVIEWER FINDINGS\n{critique.model_dump_json(indent=2)}"
         )
-        return self.llm.complete_structured(REVISE_SYSTEM, prompt, ApprovalDraft)
+        return self.llm.complete_structured(REVISE_SYSTEM, prompt, ApprovalDraft, agent="approval:revise")
 
     def _finalize(
         self, invoice: Invoice, draft: ApprovalDraft, facts: PolicyFacts, trail: list[str], unresolved: bool
