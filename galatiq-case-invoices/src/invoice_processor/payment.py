@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
 
@@ -50,42 +51,95 @@ def mock_payment(
     )
 
 
-def payment_blockers(invoice: Invoice, validation: ValidationResult, approval: ApprovalResult) -> list[str]:
+def payment_blockers(
+    invoice: Invoice, validation: ValidationResult, approval: ApprovalResult | None
+) -> list[str]:
     """Every reason this invoice must not be paid. Empty means payment may proceed."""
     blockers = []
-    if not approval.is_approved:
+    if approval is None:
+        blockers.append("No approval result: payment requires an explicit approval.")
+    elif not approval.is_approved:
         blockers.append(f"Invoice was {approval.decision.value}, not approved. Approver reasoning: {approval.reasoning}")
     if not validation.is_valid:
         blockers.append(f"Validation failed with {len(validation.errors)} error(s).")
-    ids = {invoice.invoice_number, validation.invoice_number, approval.invoice_number}
+    ids = {invoice.invoice_number, validation.invoice_number}
+    if approval is not None:
+        ids.add(approval.invoice_number)
     if len(ids) != 1:
         blockers.append(f"Invoice, validation, and approval refer to different invoices: {sorted(map(str, ids))}.")
+    if invoice.invoice_number is None:
+        blockers.append("Invoice has no invoice number to record the payment against.")
     blockers.extend(r for r in hard_failures(invoice, validation) if r not in {e.message for e in validation.errors})
     if invoice.vendor_name is None:
         blockers.append("Invoice has no vendor to pay.")
     return blockers
 
 
+class PaymentNotAuthorizedError(Exception):
+    def __init__(self, blockers: list[str]) -> None:
+        super().__init__(" ".join(blockers))
+        self.blockers = blockers
+
+
+@dataclass(frozen=True)
+class PaymentAuthorization:
+    """Proof that one specific payment passed validation and approval.
+
+    Obtain only via ``authorize_payment``. Payment tools are built from an
+    authorization and will pay exactly this vendor and amount, nothing else.
+    """
+
+    invoice_number: str
+    vendor: str
+    amount: Decimal
+    currency: str
+
+
+def authorize_payment(
+    invoice: Invoice, validation: ValidationResult, approval: ApprovalResult | None
+) -> PaymentAuthorization:
+    """Raises ``PaymentNotAuthorizedError`` unless the invoice is approved and valid."""
+    blockers = payment_blockers(invoice, validation, approval)
+    if blockers:
+        raise PaymentNotAuthorizedError(blockers)
+    assert invoice.invoice_number and invoice.vendor_name and invoice.total  # guaranteed by payment_blockers
+    return PaymentAuthorization(
+        invoice_number=invoice.invoice_number, vendor=invoice.vendor_name, amount=invoice.total,
+        currency=invoice.currency,
+    )
+
+
+def skipped_payment(invoice: Invoice, blockers: list[str]) -> PaymentResult:
+    logger.info("Payment skipped for %s: %s", invoice.invoice_number, " | ".join(blockers))
+    return PaymentResult(
+        invoice_number=invoice.invoice_number, status=PaymentStatus.SKIPPED, vendor_name=invoice.vendor_name,
+        amount=invoice.total, currency=invoice.currency, message="Payment not made. " + " ".join(blockers),
+    )
+
+
+def execute_authorized_payment(authorization: PaymentAuthorization, pay: PaymentFunction) -> PaymentResult:
+    """Call the payment function for an authorization; payment-tool errors become FAILED results."""
+    try:
+        return pay(authorization.vendor, authorization.amount, currency=authorization.currency,
+                   invoice_number=authorization.invoice_number)
+    except Exception as exc:  # a failing payment tool must not crash the pipeline
+        logger.exception("Payment tool failed for %s", authorization.invoice_number)
+        return PaymentResult(
+            invoice_number=authorization.invoice_number, status=PaymentStatus.FAILED,
+            vendor_name=authorization.vendor, amount=authorization.amount, currency=authorization.currency,
+            message=f"Payment tool error: {exc}",
+        )
+
+
 def process_payment(
     invoice: Invoice,
     validation: ValidationResult,
-    approval: ApprovalResult,
+    approval: ApprovalResult | None,
     pay: PaymentFunction = mock_payment,
 ) -> PaymentResult:
     """Pay an approved, valid invoice; otherwise return SKIPPED without calling ``pay``."""
-    blockers = payment_blockers(invoice, validation, approval)
-    if blockers:
-        logger.info("Payment skipped for %s: %s", invoice.invoice_number, " | ".join(blockers))
-        return PaymentResult(
-            invoice_number=invoice.invoice_number, status=PaymentStatus.SKIPPED, vendor_name=invoice.vendor_name,
-            amount=invoice.total, currency=invoice.currency, message="Payment not made. " + " ".join(blockers),
-        )
-
     try:
-        return pay(invoice.vendor_name, invoice.total, currency=invoice.currency, invoice_number=invoice.invoice_number)
-    except Exception as exc:  # a failing payment tool must not crash the pipeline
-        logger.exception("Payment tool failed for %s", invoice.invoice_number)
-        return PaymentResult(
-            invoice_number=invoice.invoice_number, status=PaymentStatus.FAILED, vendor_name=invoice.vendor_name,
-            amount=invoice.total, currency=invoice.currency, message=f"Payment tool error: {exc}",
-        )
+        authorization = authorize_payment(invoice, validation, approval)
+    except PaymentNotAuthorizedError as exc:
+        return skipped_payment(invoice, exc.blockers)
+    return execute_authorized_payment(authorization, pay)

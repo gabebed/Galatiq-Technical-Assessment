@@ -1,5 +1,7 @@
 """Offline tests for the LLM module (no network; the SDK client is faked)."""
 
+import json
+
 import grpc
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -114,6 +116,78 @@ def test_rpc_errors_become_llm_errors() -> None:
     client = XAIClient(LLMSettings(), sdk_client=FakeSDK(FakeRpcError()))
     with pytest.raises(LLMError, match=r"UNAUTHENTICATED.*invalid API key"):
         client.complete_structured("s", "p", Answer)
+
+
+# --------------------------------------------------------------------------- #
+# Tool-calling loop
+# --------------------------------------------------------------------------- #
+
+
+class _Function:
+    def __init__(self, name: str, arguments: str) -> None:
+        self.name, self.arguments = name, arguments
+
+
+class _ToolCall:
+    def __init__(self, call_id: str, name: str, arguments: str) -> None:
+        self.id, self.function = call_id, _Function(name, arguments)
+
+
+class _Sampled:
+    def __init__(self, tool_calls: list) -> None:
+        self.tool_calls = tool_calls
+
+
+class ToolChat(FakeChat):
+    def __init__(self, rounds: list[list[_ToolCall]], final: dict) -> None:
+        super().__init__(final)
+        self.rounds = list(rounds)
+
+    def sample(self):
+        return _Sampled(self.rounds.pop(0) if self.rounds else [])
+
+
+class ToolSDK(FakeSDK):
+    def __init__(self, rounds, final) -> None:
+        super().__init__(final)
+        self.rounds = rounds
+
+    def create(self, **kwargs) -> ToolChat:
+        self.created.append(kwargs)
+        self.last_chat = ToolChat(self.rounds, self.outcome)
+        return self.last_chat
+
+
+def _echo_toolset():
+    from invoice_processor.tools import Tool, ToolArgs, Toolset
+
+    class Args(ToolArgs):
+        text: str
+
+    return Toolset("test", [Tool("echo", "Echo text.", Args, lambda a: Answer(result=len(a.text)))])
+
+
+def test_run_tools_routes_every_call_through_the_toolset() -> None:
+    rounds = [[_ToolCall("c1", "echo", '{"text": "abc"}'), _ToolCall("c2", "exec", '{"code": "1"}')]]
+    sdk = ToolSDK(rounds, {"result": 7})
+    toolset = _echo_toolset()
+
+    answer = XAIClient(LLMSettings(), sdk_client=sdk).run_tools("s", "p", toolset, Answer)
+
+    assert answer == Answer(result=7)
+    assert [(c.tool, c.ok) for c in toolset.calls] == [("echo", True), ("exec", False)]
+    assert len(sdk.created[0]["tools"]) == 1 and sdk.created[0]["tools"][0].function.name == "echo"
+    tool_messages = [m for m in sdk.last_chat.messages if getattr(m, "tool_call_id", "")]
+    assert [m.tool_call_id for m in tool_messages] == ["c1", "c2"]
+    refused = json.loads(tool_messages[1].content[0].text)
+    assert refused["ok"] is False and "not available" in refused["error"]
+
+
+def test_run_tools_stops_runaway_loops() -> None:
+    rounds = [[_ToolCall(f"c{i}", "echo", '{"text": "x"}')] for i in range(10)]
+    client = XAIClient(LLMSettings(), sdk_client=ToolSDK(rounds, {"result": 1}))
+    with pytest.raises(LLMError, match="exceeded 3 tool-calling rounds"):
+        client.run_tools("s", "p", _echo_toolset(), Answer, max_rounds=3)
 
 
 def test_schema_mismatch_becomes_llm_error() -> None:

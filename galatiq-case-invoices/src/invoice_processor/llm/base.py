@@ -14,6 +14,8 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from invoice_processor.tools import Toolset
+
 T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_PROVIDER = "xai"
@@ -28,6 +30,11 @@ class LLMError(RuntimeError):
 class LLMClient(Protocol):
     def complete_structured(self, system: str, prompt: str, schema: type[T]) -> T:
         """Send a system + user prompt and return a validated instance of ``schema``."""
+        ...
+
+    def run_tools(self, system: str, prompt: str, toolset: Toolset, schema: type[T], *, max_rounds: int = 6) -> T:
+        """Let the model call tools from ``toolset`` (only via ``Toolset.invoke``), then
+        return its final answer as a validated instance of ``schema``."""
         ...
 
 
