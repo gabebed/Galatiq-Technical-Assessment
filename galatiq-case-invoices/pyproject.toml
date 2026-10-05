@@ -3,7 +3,7 @@ name = "invoice-processor"
 version = "0.1.0"
 description = "Galatiq case: multi-agent invoice processing automation"
 requires-python = ">=3.10"
-dependencies = ["pydantic>=2.7", "pdfplumber>=0.11"]
+dependencies = ["pydantic>=2.7", "pdfplumber>=0.11", "langgraph>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
