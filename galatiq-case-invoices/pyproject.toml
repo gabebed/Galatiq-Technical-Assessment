@@ -3,7 +3,7 @@ name = "invoice-processor"
 version = "0.1.0"
 description = "Galatiq case: multi-agent invoice processing automation"
 requires-python = ">=3.10"
-dependencies = ["pydantic>=2.7", "pdfplumber>=0.11", "langgraph>=1.0"]
+dependencies = ["pydantic>=2.7", "pdfplumber>=0.11", "langgraph>=1.0", "xai-sdk>=1.20"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -11,3 +11,4 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["live: calls a real external LLM API (opt in with RUN_LIVE_LLM_TESTS=1)"]
