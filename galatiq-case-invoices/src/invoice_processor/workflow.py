@@ -10,10 +10,18 @@ Nodes are thin adapters: all business rules stay in ingestion, validation,
 approval, and payment. Inventory access and the payment function are injected
 explicitly.
 
-With an ``llm``, two agents participate, each limited to its own toolset:
-the validation agent (read-only inventory tools, advisory output only) and the
-payment agent (``mock_payment`` bound to a ``PaymentAuthorization``). Without
-an ``llm`` the workflow is fully deterministic.
+With an ``llm``, three agents run inside the nodes (they never call each other):
+
+* ``validate``: the validation agent (read-only inventory tools); advisory, and
+  only for invoices that passed deterministic validation.
+* ``approve``: ``LLMApprover`` (draft -> critique -> revise), never more lenient
+  than the rule-based policy.
+* ``pay``: the payment agent, whose only tool is ``mock_payment`` bound to a
+  ``PaymentAuthorization``.
+
+Without an ``llm`` the same graph runs fully deterministically. Input is limited
+to ``invoice_path`` (``WorkflowInput``), so stage results in state are always
+produced by the graph itself.
 """
 
 from __future__ import annotations

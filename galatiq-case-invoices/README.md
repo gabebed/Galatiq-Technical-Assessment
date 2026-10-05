@@ -208,29 +208,51 @@ payment function is never reached.
 
 ### With the Grok agents: INV-1012 (scan damage, $9,975), excerpt
 
+`python main.py --invoice_path=data/invoices/invoice_1012.pdf --llm=on`. Real output; long lines are
+shortened with `...`.
+
 ```text
 VALIDATION  PASSED  (0 errors, 2 warnings)
   WARNING [extraction_uncertain] ... corrected OCR artifact '$3,500.O0' -> '$3,500.00' ...
   WARNING [extraction_uncertain] ... corrected OCR artifact '26-Jan-2O26' -> '26-Jan-2026' ...
-  Agent review: All invoice line items match stocked inventory and requested quantities are
-  available: WidgetA 12 of 15, WidgetB 7 of 10, and GadgetX 4 of 5. ...
+  Agent review: All three line items (WidgetA x12, WidgetB x7, GadgetX x4) match stocked inventory
+  names exactly and are within available stock (15, 10, and 5 respectively). ...
 
 APPROVAL  APPROVED  (standard review; reviewer: llm-approval-agent)
-  Approved. Currency is USD and total is $9,975.00 ... not strictly greater than $10,000.00, so
-  additional scrutiny is not required. ... Warnings considered and acknowledged: (1) ... '$3,500.O0'
-  corrected to '$3,500.00', which matches 7 x $500.00; (2) ...
+  Approved. Currency is USD and the total is present and positive at $9,975.00, which is not
+  strictly greater than $10,000.00, so additional scrutiny is not required ... Two unresolved
+  extraction_uncertain WARNINGs were considered and do not block approval outside additional
+  scrutiny: (1) items[1].line_total OCR correction '$3,500.O0' -> '$3,500.00'; (2) ...
+  Flags: warning:extraction_uncertain, llm_reviewed
   Review trail (2 steps):
-    Draft 1: APPROVED (no scrutiny). Approved. Currency is USD and total is $9,975.00 ...
+    Draft 1: APPROVED (no scrutiny). Approved. Currency is USD and the total is present and posit...
     Critique 1: no issues found.
 
 PAYMENT  PAID  9,975.00 USD to QuickShip Distributers
+  Transaction   MOCK-E07952581774
 
 AGENT TOOL CALLS  7 (0 refused)
   validation.lookup_inventory({"item":"WidgetA"}) -> ok
   ...
   validation.check_stock({"item":"GadgetX","quantity":4}) -> ok
   payment.mock_payment({"vendor":"QuickShip Distributers","amount":9975.0}) -> ok
+
+LLM CALLS  8 request(s) to xai/grok-4.7: 8 ok, 0 failed | tokens 18,423 in / 707 out | cost $0.0400
+  #   time      agent            operation          secs   tokens in->out  structured     result
+  1   16:56:38  validation       tool_round         12.1        2,254->81  not_requested  ok
+      request id 84ad4ae4-712d-96ad-b7dc-6d7963b554e8
+  ...
+  4   16:57:20  approval:draft   structured         12.2       2,210->273  parsed         ok
+      request id 6d7e8de0-7571-93c5-8b8c-1ff84b36e68d
+  5   16:57:32  approval:critic  structured          5.6         2,735->5  parsed         ok
+      request id c469b0f5-aeeb-998e-964f-8e5e6a9b1a57
+  ...
+  8   16:57:55  payment          final_structured    2.5        1,933->42  parsed         ok
+      request id e6a22371-ae1b-909e-8576-52177f6fdfdd
 ```
+
+At the same time, stderr shows a START line and an OK line for each of the 8 requests, e.g.
+`LLM request #4 START  agent=approval:draft provider=xai model=grok-4.7 op=structured schema=ApprovalDraft`.
 
 ---
 
@@ -272,8 +294,33 @@ Detailed design (state, contracts, failure handling, module map):
 
 ## Agents and tools
 
-Each agent receives a `Toolset` containing **only its own tools**. Tools are never handed to the model as
-raw functions. Every call goes through `Toolset.invoke`
+**What counts as an agent here:** a component whose output is produced by the LLM, through its own prompt
+and output structure, optionally with tools. There are **three agents**, and the approval agent also runs a
+**critic role**.
+
+- **Agents run only in LLM mode:** `--llm=on`, or the default `auto` with `XAI_API_KEY` set. Without a key,
+  the same graph runs fully deterministically.
+- **Agents never call each other.** LangGraph routes between nodes based on deterministic results, and
+  each agent runs inside one node.
+
+| Agent | Node · implementation | When it runs | Input | Output | Tools | Can it change the outcome? |
+|---|---|---|---|---|---|---|
+| **Validation** | `validate` · `agents.review_validation` | Only after deterministic validation passed | Invoice + validation result | `ValidationReview` (summary, concerns) | `lookup_inventory`, `check_stock` | No. Advisory: shown in the report, not consumed downstream. |
+| **Approval** (+ critic role) | `approve` · `approval_agent.LLMApprover` | Every valid invoice | Invoice, validation result, policy text. The critic also gets the policy engine's decision as facts. | `ApprovalResult` with the full `review_trail` | None | Only to be **stricter**: it may reject what policy approves, never the reverse. |
+| **Payment** | `pay` · `agents.run_payment_agent` | Only after `authorize_payment` succeeded | The `PaymentAuthorization` only (no invoice text) | `PaymentResult` recorded from what the tool executed | `mock_payment`, bound to the authorization | No. It can pay only the authorized vendor and amount, once. |
+
+**Deliberately *not* agents:** these are deterministic and tested.
+
+- ingestion (`extract_invoice`)
+- the validation checks (`validate_invoice`)
+- the policy engine (`RuleBasedApprover`)
+- the payment gate (`authorize_payment`)
+
+The exact inventory of components, with an execution diagram, is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#7-agents).
+
+**How tools are protected.** Each agent receives a `Toolset` containing **only its own tools**; tools are
+never handed to the model as raw functions. Every call goes through `Toolset.invoke`
 ([tools.py](src/invoice_processor/tools.py)), which:
 
 - rejects tools outside the agent's set
@@ -281,12 +328,6 @@ raw functions. Every call goes through `Toolset.invoke`
 - enforces a call budget
 - logs the call and records it in the run's audit trail
 - returns a structured `ToolResult(ok, data | error)` instead of raising
-
-| Agent | Tools | Can it change the outcome? |
-|---|---|---|
-| Validation agent | `lookup_inventory(item)`, `check_stock(item, quantity)`: read-only connection, parameterized SQL | No. Its review is advisory. |
-| Approval agent | None (reasons over the invoice and validation result) | Only to be **stricter**: it may reject what policy would approve, never the reverse. |
-| Payment agent | `mock_payment(vendor, amount)`, built from one `PaymentAuthorization`. Pays only that exact vendor and amount, once, within 3 calls. | No. The recorded result is what the tool executed, not what the agent claims. |
 
 No agent has a SQL tool, a code-execution tool, or another agent's tools.
 
@@ -326,9 +367,14 @@ warnings on the real INV-1012.
 
 The central invariant is enforced in layers, so no single bug or misbehaving agent can break it:
 
+0. **Clean input.** The workflow accepts only `invoice_path`. Any `invoice`, `validation`, or `approval`
+   passed into `workflow.invoke()` is dropped, and routing stops on a failed stage, so every result in
+   state was produced by the graph itself.
 1. **Routing.** The graph reaches `pay` only from an APPROVED approval.
 2. **Authorization.** `authorize_payment` re-checks everything rather than trusting earlier stages. It
    issues a `PaymentAuthorization` only if all of these hold:
+   - the approval is a genuine, strictly valid `ApprovalResult`; dicts, strings, look-alike objects, and
+     unvalidated `model_construct()` objects are refused
    - an APPROVED decision exists, for **this** invoice number
    - the decision was made on the **exact** vendor, amount, and currency (so an approval of INV-1004 cannot
      pay its revised, $4,050 larger version)
@@ -337,16 +383,22 @@ The central invariant is enforced in layers, so no single bug or misbehaving age
 3. **A single call site.** Only `execute_authorized_payment` calls the payment function. A test parses
    the source code to enforce this.
 4. **A bound tool.** The payment agent's tool pays only its authorization's values, once.
-5. **Approval overrides.** Any approver output that approves a hard failure, a different invoice, or
-   different terms is overridden to REJECTED.
+5. **Approval overrides.** Any approver output that is malformed, or that approves a hard failure, a
+   different invoice, or different terms, is overridden to REJECTED.
 6. **Duplicate guard.** A workflow never pays the same invoice number twice.
 7. **Failure handling.** If anything fails after money moved, the tool's record of the payment is kept,
    so it is never re-paid on retry.
 
-[test_qa_invariants.py](tests/test_qa_invariants.py) proves this. It runs every combination of 8 approval
-states, 6 invoice defects, valid/invalid validation, and both payment paths (192 cases). Payment happens in
-exactly one combination. [test_agent_safety.py](tests/test_agent_safety.py) runs adversarial agents that
-try to pay "Evil Corp", inflate amounts, call SQL/Python tools, and inject SQL.
+Three test files prove this:
+
+- **[test_qa_invariants.py](tests/test_qa_invariants.py)** runs every combination of 8 approval states, 6
+  invoice defects, valid/invalid validation, and both payment paths (192 cases). Payment happens in
+  exactly one combination.
+- **[test_payment_gate_audit.py](tests/test_payment_gate_audit.py)** counts calls to the real default
+  payment path, the one the CLI uses. It shows that rejected invoices, failed validations, malformed
+  approvals, and forged workflow input never pay, and that approved invoices pay exactly once.
+- **[test_agent_safety.py](tests/test_agent_safety.py)** runs adversarial agents that try to pay "Evil
+  Corp", inflate amounts, call SQL/Python tools, and inject SQL.
 
 ---
 
@@ -383,8 +435,9 @@ CREATE TABLE inventory (item TEXT PRIMARY KEY, stock INTEGER NOT NULL CHECK (sto
 - **Privacy.** In LLM mode, extracted invoice data is sent to xAI. The payment agent never sees invoice
   free text, so prompt injection in invoice notes cannot reach it (this is tested).
 
-Measured cost in LLM mode: about $0.02 and 10–25 seconds per approved invoice (validation review,
-approval draft plus critique, payment). Invoices rejected at validation make no LLM calls.
+Measured in LLM mode: an approved invoice takes 8 requests (3 validation, draft, critique, 3 payment)
+and costs about $0.03–0.04. Wall time ranged from about 30 seconds to over a minute, depending on xAI
+latency. Invoices rejected at validation make no LLM calls.
 
 ---
 
@@ -431,19 +484,21 @@ approval draft plus critique, payment). Invoices rejected at validation make no 
 ## Testing
 
 ```bash
-python -m pytest                                    # 572 offline tests, ~10 s, no network
-python -m pytest tests/test_qa_invariants.py -q     # payment-safety invariants only
+python -m pytest                                    # 672 offline tests, ~15 s, no network
+python -m pytest tests/test_qa_invariants.py tests/test_payment_gate_audit.py -q   # payment safety only
 RUN_LIVE_LLM_TESTS=1 python -m pytest -m live       # 3 tests against the real xAI API (needs XAI_API_KEY)
 ```
 
 | Area | Tests | Highlights |
 |---|---|---|
 | Safety invariants | 225 | 192-case approval/payment combinations; code-structure checks on payment call sites; LLM crashes and invalid output at every stage; prompt injection; malformed files; corrupt databases |
+| Payment gate audit | 86 | Counts calls to the real default payment path: rejected / invalid / malformed / forged input → never paid; approved → paid exactly once |
 | Ingestion | 78 | Every sample file's expected fields; scan damage; truncated, re-encoded, and empty files |
 | Tools and agent safety | 60 | Allowlists, argument validation, budgets, SQL injection, adversarial agents |
-| Validation | 40 | All six README scenarios and every sample file against the analysis matrix |
 | Approval and reflection loop | 52 | Threshold boundaries, overrides, critique corrections, iteration limits |
-| Workflow, payment, CLI, other | 117 | Graph routing, equivalence with the direct pipeline, exit codes, JSON output, logging |
+| Validation | 40 | All six README scenarios and every sample file against the analysis matrix |
+| LLM client and telemetry | 28 | Structured output, tool loop, one logged record per real request, no keys or prompts in logs, visible failures, `--llm-log` |
+| Workflow, payment, CLI, other | 103 | Graph routing, equivalence with the direct pipeline, exit codes, JSON output, logging, database |
 
 Malformed-file tests use damaged copies of the real sample invoices rather than invented content.
 CI ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs the suite on Linux and Windows,
@@ -471,11 +526,11 @@ Python 3.11–3.13.
 │   ├── payment.py                Authorization, mock payment, duplicate guard
 │   ├── tools.py, agent_tools.py  Tool framework and per-agent toolsets
 │   ├── agents.py                 Validation and payment agents
-│   ├── llm/                      Provider-agnostic LLM client (xAI implementation)
+│   ├── llm/                      Provider-agnostic LLM client, xAI implementation, request telemetry
 │   ├── workflow.py               LangGraph state machine
 │   ├── cli.py, report.py         Command line and rendering
 │   └── observability.py          Invoice-tagged text/JSON logging
-└── tests/                        575 tests (3 live, opt-in)
+└── tests/                        675 tests (3 live, opt-in)
 ```
 
 ---
@@ -504,8 +559,7 @@ Python 3.11–3.13.
 
 ## Known limitations
 
-From a dedicated QA review ([test_qa_invariants.py](tests/test_qa_invariants.py)); these are documented
-rather than hidden:
+From the QA, payment-gate, and orchestration audits; these are documented rather than hidden:
 
 1. **The duplicate guard is in memory.** Re-running the CLI would pay again. Production needs a persistent
    payment ledger with idempotency keys.
@@ -518,3 +572,10 @@ rather than hidden:
    exchange rates are configured, so non-USD invoices always get scrutiny.
 5. **No file size or page limits** on input files.
 6. **No human-in-the-loop step** and no retry/backoff for LLM calls.
+7. **Agent collaboration is limited by design:**
+   - Nothing downstream reads the validation agent's review; it is shown in the report but not passed
+     to the approval agent.
+   - The critic runs inside the `approve` node rather than as its own graph node, so the reflection loop
+     is visible in `review_trail` and the LLM call log, not in the LangGraph graph.
+8. **No agents run offline.** Without `XAI_API_KEY` (or with `--llm=off`), the system is a deterministic
+   pipeline.

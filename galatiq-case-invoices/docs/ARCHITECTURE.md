@@ -51,7 +51,17 @@ class InvoiceState(TypedDict, total=False):
     error: str
     tool_calls: Annotated[list[ToolCallRecord], operator.add]   # audit trail across agents
     agent_errors: Annotated[list[str], operator.add]
+    llm_calls: list[LLMCallRecord]             # added by the CLI after the run, not by a node
 ```
+
+How state moves through the graph:
+
+- **Partial updates.** Each node returns only the keys it changes, and LangGraph merges them in.
+  `tool_calls` and `agent_errors` accumulate across nodes (`operator.add`).
+- **Input is limited to `invoice_path`** (`WorkflowInput`). Any other key a caller passes, such as a forged
+  `approval`, is dropped.
+- **A failed stage ends the run.** The routing functions stop on `status == FAILED`, so they never depend
+  on a key being absent.
 
 `build_workflow(inventory, pay=None, approver=None, policy=None, llm=None)` takes its collaborators
 explicitly:
@@ -116,7 +126,9 @@ reports an invoice as valid without having checked it.
 `approve_invoice(invoice, validation, approver, policy)` runs any `Approver`, then calls
 `enforce_hard_rules`.
 
-That function overrides to REJECTED any approval that does one of these:
+Before that, `_well_formed` turns approver output that isn't a strictly valid `ApprovalResult` into REJECTED
+(flag `malformed_approval`). `enforce_hard_rules` then overrides to REJECTED any approval that does one of
+these:
 
 - approves a hard failure (validation errors, or a missing or non-positive total)
 - is for a different invoice number
@@ -136,7 +148,71 @@ It also forces scrutiny on when policy requires it, and stamps the reviewed term
 `LLMApprover` adds the draft → critique → revise loop described in the README. Its result can never be
 more lenient than `RuleBasedApprover`'s.
 
-## 7. Tools and agents ([tools.py](../src/invoice_processor/tools.py), [agent_tools.py](../src/invoice_processor/agent_tools.py), [agents.py](../src/invoice_processor/agents.py))
+## 7. Agents
+
+**What counts as an agent here:** a component whose output is produced by the LLM, through its own prompt
+and output structure, optionally with tools. Under that definition there are **three agents**, and the
+approval agent also runs a **critic role**.
+
+- **Agents run only when `build_workflow(..., llm=...)` is given a client.** In the CLI that means
+  `--llm=on`, or `auto` with `XAI_API_KEY` set.
+- **Agents never call each other.** LangGraph routes between nodes, and each agent runs inside one node.
+
+| | Validation agent | Approval agent | Critic (role inside the approval agent) | Payment agent |
+|---|---|---|---|---|
+| **Implemented in** | `agents.review_validation` + `agent_tools.build_validation_tools` | `approval_agent.LLMApprover.review` (draft, `_revise`) | `LLMApprover._critique` (LLM call + `deterministic_findings`) | `agents.run_payment_agent` + `agent_tools.PaymentToolset` |
+| **Invoked by** | `validate` node, only if an LLM is configured **and** deterministic validation passed | `approve` node → `approve_invoice` → `approver.review` (`build_workflow` selects `LLMApprover` when given an LLM and no approver) | `LLMApprover.review` loop | `pay` node → `payment_step`, only after `authorize_payment` succeeded |
+| **Input** | Invoice JSON + `ValidationResult` JSON | Invoice, `ValidationResult`, policy text (not the policy engine's decision) | Same context + policy engine facts (baseline decision and reasoning, scrutiny explanation) + the draft | `PaymentAuthorization` only (invoice number, vendor, amount, currency) |
+| **Output** | `ValidationReview` + `ToolCallRecord`s → `validation_review`, `tool_calls` | `ApprovalResult` incl. `review_trail` → `approval` | `Critique(findings)`, merged with deterministic findings | `PaymentResult` from the tool's execution record, `PaymentReport`, `ToolCallRecord`s |
+| **Tools** | `lookup_inventory`, `check_stock` | none | none | `mock_payment` (bound) |
+| **LLM requests** | `run_tools`: tool rounds + final structured answer | 1 draft + up to 2 revisions | 1 per round (≤ 2) | `run_tools`: ≤ 3 rounds + final structured answer |
+| **On failure** | Deterministic result stands; `agent_errors` | Rule-based decision, flag `llm_unavailable` | (part of the approval agent) | Invoice not paid → `failed`; a payment already made is kept |
+
+**Deliberately not agents** (deterministic):
+
+- `extract_invoice` (ingestion)
+- `validate_invoice` (validation checks)
+- `RuleBasedApprover` (the policy engine; also produces the critic's facts and the leniency floor)
+- `authorize_payment` / `execute_authorized_payment` / `DuplicatePaymentGuard`
+- the `reject` node
+
+**How the agents are connected:**
+
+- **Nothing downstream reads the validation agent's review.** It is advisory and only appears in reports.
+- **The approval agent works from the deterministic validation result.**
+- **The payment agent sees only the authorization derived from the approved invoice.**
+- **The reflection loop runs entirely inside the `approve` node.** It is recorded in `review_trail` and
+  in the LLM call log.
+
+### Execution flow (LLM mode)
+
+```
+ingest (deterministic) ──unreadable──► END failed
+   │
+   ▼
+validate: validate_invoice (deterministic)
+   │        └─ valid & LLM ─► Validation agent ── lookup_inventory / check_stock   (advisory)
+   ├─ inventory unavailable ─► END failed
+   ├─ invalid ─────────────────────────────────────────────► reject ─► END rejected
+   ▼ valid
+approve: RuleBasedApprover (baseline facts)
+         Approval agent: draft ─► Critic ─► findings? ─yes─► revise ─┐   (≤ 2 rounds)
+                                    ▲                                │
+                                    └────────────────────────────────┘
+         _finalize (never more lenient than baseline) ─► enforce_hard_rules
+   ├─ rejected ────────────────────────────────────────────► reject ─► END rejected
+   ▼ approved
+pay: authorize_payment ──refused──► SKIPPED
+   │
+   ▼ PaymentAuthorization
+   Payment agent ── mock_payment tool (bound) ─► DuplicatePaymentGuard ─► mock_payment() ─► END completed / failed
+```
+
+In deterministic mode the graph is the same, minus the three agents: `validate` runs only the
+deterministic checks, `approve` uses `RuleBasedApprover`, and `pay` calls `execute_authorized_payment`
+directly.
+
+### Tool calls ([tools.py](../src/invoice_processor/tools.py), [agent_tools.py](../src/invoice_processor/agent_tools.py))
 
 ```
 LLM ──tool call(name, json args)──► Toolset.invoke
@@ -158,6 +234,22 @@ LLM ──tool call(name, json args)──► Toolset.invoke
 The xAI tool loop ([llm/xai.py](../src/invoice_processor/llm/xai.py)) caps tool-calling rounds and then
 asks for a final structured answer with `chat.parse`.
 
+### LLM request telemetry ([llm/telemetry.py](../src/invoice_processor/llm/telemetry.py))
+
+Every network request goes through `XAIClient._request` → `observe_request`. It logs one line immediately
+before the request and one immediately after, on logger `invoice_processor.llm.calls`, and produces an
+`LLMCallRecord` with:
+
+- sequence number, agent, provider, model, and operation
+- start time, completion time, and duration
+- whether the API call succeeded, and whether the structured output parsed
+- request ID, token usage, cost, and tool-call count
+- a sanitized error, if any
+
+No prompts, outputs, or keys are logged. Schema failures record only the failing field paths. The CLI
+collects the records per invoice (`collect_llm_calls`) for the report's **LLM CALLS** table and the
+JSON output. `--no-llm-log` hides successful requests, but failures are always shown.
+
 ## 8. Payment ([payment.py](../src/invoice_processor/payment.py))
 
 ```
@@ -168,11 +260,16 @@ authorize_payment(invoice, validation, approval) ──► PaymentAuthorization 
 
 `payment_blockers` lists every reason not to pay:
 
+- an invoice, validation result, or approval that isn't a genuine, strictly valid model instance (dicts,
+  look-alike objects, and unvalidated `model_construct()` objects are refused)
 - no approval, or a decision that isn't APPROVED
 - the approval doesn't cover these terms
 - validation failed
 - the invoice, validation, and approval refer to different invoice numbers
 - a missing invoice number or vendor, or a non-positive total
+
+These are re-checked explicitly after the blockers, not with an `assert`, so the checks survive
+`python -O`.
 
 `DuplicatePaymentGuard` wraps the payment function and refuses a second PAID for the same invoice number.
 Static tests in `test_qa_invariants.py` parse the source to enforce three things:
@@ -192,6 +289,9 @@ Static tests in `test_qa_invariants.py` parse the source to enforce three things
 | Validation agent fails (any exception) | Deterministic result stands, `agent_errors` recorded | unaffected |
 | Approval agent fails or returns invalid output | Deterministic policy decision, flagged `llm_unavailable` | unaffected |
 | Approver approves a hard failure, wrong invoice, or wrong terms | Overridden to REJECTED, flagged `approval_overridden` | `rejected` |
+| Approver returns malformed output (dict, string, unvalidated object) | Treated as REJECTED, flagged `malformed_approval` | `rejected` |
+| Caller passes forged `invoice` / `validation` / `approval` into `workflow.invoke()` | Dropped by `WorkflowInput` | unaffected |
+| Any LLM request fails (API error or invalid structured output) | Logged at ERROR, shown under LLM FAILURES, end-of-run stderr warning | per agent row above |
 | Payment agent fails before paying | FAILED payment, nothing paid | `failed` |
 | Payment agent fails after paying | The tool's PAID record is kept | `completed` |
 | Payment function raises | FAILED payment | `failed` |
@@ -213,7 +313,7 @@ Static tests in `test_qa_invariants.py` parse the source to enforce three things
 | `tools.py` | `Tool`, `Toolset`, `ToolResult`, `ToolCallRecord` |
 | `agent_tools.py` | Validation and payment toolsets |
 | `agents.py` | `review_validation`, `run_payment_agent` |
-| `llm/` | `LLMClient` interface, settings, `XAIClient`, provider registry |
+| `llm/` | `LLMClient` interface, settings, `XAIClient`, provider registry, request telemetry (`telemetry.py`) |
 | `workflow.py` | LangGraph graph and `payment_step` |
 | `cli.py`, `report.py` | Command line, report rendering, JSON output, exit codes |
 | `observability.py` | Invoice-tagged text and JSON logging |
